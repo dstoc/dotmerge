@@ -164,6 +164,64 @@ fn sync_reuses_existing_added_revision_as_import_ancestor() {
     );
 }
 
+#[test]
+fn sync_reuses_import_without_merge_when_target_is_ancestor() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    write_file(&sandbox.home().join("foo"), "hello\n");
+
+    let mut add = Command::cargo_bin("dotmerge").unwrap();
+    add.env("HOME", sandbox.home())
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("foo");
+    add.assert().success();
+
+    sandbox.run_jj(&["desc", "-m", "adding foo"]);
+    sandbox.run_jj(&["bookmark", "create", "origin/main"]);
+
+    let mut sync = Command::cargo_bin("dotmerge").unwrap();
+    sync.env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    sync.assert().success();
+
+    let last_sync_description = sandbox
+        .jj_stdout(&[
+            "log",
+            "-r",
+            "last-sync",
+            "--no-graph",
+            "-T",
+            "description.first_line()",
+        ])
+        .trim()
+        .to_owned();
+    assert_eq!(
+        last_sync_description, "dotmerge import from home",
+        "expected sync to reuse the prepared import instead of creating a merge commit"
+    );
+
+    let last_sync_parents = sandbox.jj_stdout(&[
+        "log",
+        "-r",
+        "last-sync",
+        "--no-graph",
+        "-T",
+        "parents.map(|c| c.commit_id()).join(\" \") ++ \"\\n\"",
+    ]);
+    assert_eq!(
+        last_sync_parents.split_whitespace().count(),
+        1,
+        "expected `last-sync` to be a non-merge commit when target is already an ancestor:\n{last_sync_parents}"
+    );
+}
+
 struct TestSandbox {
     tempdir: TempDir,
     home: PathBuf,

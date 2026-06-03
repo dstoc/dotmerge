@@ -322,6 +322,12 @@ impl JjClient {
         left: &RevisionSummary,
         right: &RevisionSummary,
     ) -> Result<RevisionSummary> {
+        if self.is_ancestor(right, left)? {
+            return Ok(left.clone());
+        }
+        if self.is_ancestor(left, right)? {
+            return Ok(right.clone());
+        }
         self.create_merge_change(left, right, "dotmerge merge")
     }
 
