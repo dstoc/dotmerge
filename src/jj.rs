@@ -1,127 +1,176 @@
 use crate::model::{BookmarkSummary, RevisionSummary};
-use crate::util::ensure_success;
 use anyhow::{Context, Result, anyhow};
+use chrono::Local;
+use jj_lib::backend::CommitId;
+use jj_lib::commit::Commit;
+use jj_lib::config::StackedConfig;
+use jj_lib::conflicts::{
+    ConflictMarkerStyle, ConflictMaterializeOptions, MaterializedTreeValue,
+    materialize_merge_result_to_bytes, materialize_tree_value,
+};
+use jj_lib::files::FileMergeHunkLevel;
+use jj_lib::fileset::FilesetAliasesMap;
+use jj_lib::merge::SameChange;
+use jj_lib::object_id::ObjectId as _;
+use jj_lib::op_store::RefTarget;
+use jj_lib::repo::{ReadonlyRepo, Repo as _, StoreFactories};
+use jj_lib::repo_path::{RepoPathBuf, RepoPathUiConverter};
+use jj_lib::revset::{
+    RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions, RevsetParseContext,
+    RevsetWorkspaceContext, SymbolResolver, UserRevsetExpression, parse,
+};
+use jj_lib::rewrite::merge_commit_trees;
+use jj_lib::settings::UserSettings;
+use jj_lib::time_util::DatePatternContext;
+use jj_lib::tree_merge::MergeOptions;
+use jj_lib::workspace::{Workspace, default_working_copy_factories};
+use pollster::FutureExt as _;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct JjClient {
-    repo_path: PathBuf,
+    workspace_root: PathBuf,
+    settings: UserSettings,
 }
 
 impl JjClient {
     pub fn open(repo_path: impl Into<PathBuf>) -> Result<Self> {
+        let workspace_root = find_workspace_root(repo_path.into())?;
+        let settings = UserSettings::from_config(StackedConfig::with_defaults())
+            .context("failed to construct default jj settings")?;
         let client = Self {
-            repo_path: repo_path.into(),
+            workspace_root,
+            settings,
         };
-        client.verify_repo()?;
+        client.load_workspace_and_repo()?;
         Ok(client)
     }
 
     pub fn repo_path(&self) -> &Path {
-        &self.repo_path
+        &self.workspace_root
     }
 
     pub fn resolve_rev(&self, revset: &str) -> Result<RevisionSummary> {
-        let output = self
-            .jj([
-                "log",
-                "-r",
-                revset,
-                "-T",
-                "commit_id",
-                "--no-graph",
-                "--limit",
-                "2",
-            ])?
-            .output()?;
-        let output = ensure_success("jj", &["log", "-r", revset], output)?;
-        let resolved = String::from_utf8(output.stdout)?;
-        let mut ids = resolved
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty());
-
-        let first = ids
-            .next()
-            .ok_or_else(|| anyhow!("`{revset}` resolved to no revisions"))?;
-        if ids.next().is_some() {
-            return Err(anyhow!("`{revset}` resolved to more than one revision"));
-        }
-
-        Ok(RevisionSummary::resolved(revset, first))
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let commit = self.resolve_commit_by_revset(&workspace, &repo, revset)?;
+        Ok(self.revision_summary(revset, commit.id()))
     }
 
-    pub fn read_tree(&self, _rev: &RevisionSummary) -> Result<String> {
-        Err(anyhow!("read_tree not implemented yet"))
+    pub fn read_tree(&self, rev: &RevisionSummary) -> Result<String> {
+        let files = self.list_files(rev)?;
+        Ok(files
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 
     pub fn list_files(&self, rev: &RevisionSummary) -> Result<Vec<PathBuf>> {
-        let rev_arg = self.rev_arg(rev);
-        let args = vec![
-            "file".to_string(),
-            "list".to_string(),
-            "--quiet".to_string(),
-            "-r".to_string(),
-            rev_arg.to_string(),
-        ];
-        let output = self
-            .run_jj(args)
-            .with_context(|| format!("failed to list files for revision `{rev_arg}`"))?;
-        let stdout =
-            String::from_utf8(output.stdout).context("jj file list returned invalid UTF-8")?;
-        Ok(stdout
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(PathBuf::from)
-            .collect())
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let commit = self.resolve_summary_to_commit(&workspace, &repo, rev)?;
+        let mut files = commit
+            .tree()
+            .entries()
+            .map(|(path, _)| path.to_fs_path(Path::new("")))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to convert repo paths to filesystem paths")?;
+        files.sort();
+        Ok(files)
     }
 
     pub fn file_at_rev(&self, rev: &RevisionSummary, path: &Path) -> Result<Option<Vec<u8>>> {
-        let rev_arg = self.rev_arg(rev);
-        let path_arg = path.to_string_lossy().into_owned();
-        let args = vec![
-            "file".to_string(),
-            "show".to_string(),
-            "--quiet".to_string(),
-            "-r".to_string(),
-            rev_arg.to_string(),
-            path_arg.clone(),
-        ];
-        let output = self
-            .jj(args.iter().map(String::as_str))?
-            .output()
-            .with_context(|| format!("failed to read `{path_arg}` at revision `{rev_arg}`"))?;
-        if output.status.success() {
-            return Ok(Some(output.stdout));
-        }
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let commit = self.resolve_summary_to_commit(&workspace, &repo, rev)?;
+        let repo_path = self.parse_repo_path(path)?;
+        let tree = commit.tree();
+        let value = tree
+            .path_value(repo_path.as_ref())
+            .block_on()
+            .with_context(|| {
+                format!(
+                    "failed to read `{}` from revision `{}`",
+                    path.display(),
+                    self.rev_label(rev)
+                )
+            })?;
+        let materialized =
+            materialize_tree_value(repo.store(), repo_path.as_ref(), value, tree.labels())
+                .block_on()
+                .with_context(|| {
+                    format!(
+                        "failed to materialize `{}` from revision `{}`",
+                        path.display(),
+                        self.rev_label(rev)
+                    )
+                })?;
 
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("No such path:") {
-            return Ok(None);
+        match materialized {
+            MaterializedTreeValue::Absent => Ok(None),
+            MaterializedTreeValue::File(mut file) => file
+                .read_all(repo_path.as_ref())
+                .block_on()
+                .map(Some)
+                .with_context(|| {
+                    format!(
+                        "failed to read `{}` from revision `{}`",
+                        path.display(),
+                        self.rev_label(rev)
+                    )
+                }),
+            MaterializedTreeValue::FileConflict(file) => {
+                let bytes = materialize_merge_result_to_bytes(
+                    &file.contents,
+                    &file.labels,
+                    &ConflictMaterializeOptions {
+                        marker_style: ConflictMarkerStyle::Diff,
+                        marker_len: None,
+                        merge: MergeOptions {
+                            hunk_level: FileMergeHunkLevel::Line,
+                            same_change: SameChange::Accept,
+                        },
+                    },
+                );
+                Ok(Some(bytes.to_vec()))
+            }
+            MaterializedTreeValue::Symlink { target, .. } => Ok(Some(target.into_bytes())),
+            MaterializedTreeValue::Tree(_) => Err(anyhow!(
+                "`{}` is a directory in `{}`",
+                path.display(),
+                self.rev_label(rev)
+            )),
+            MaterializedTreeValue::GitSubmodule(_) => Err(anyhow!(
+                "`{}` is a git submodule in `{}`",
+                path.display(),
+                self.rev_label(rev)
+            )),
+            MaterializedTreeValue::OtherConflict { .. } => Err(anyhow!(
+                "`{}` has a non-file conflict in `{}`",
+                path.display(),
+                self.rev_label(rev)
+            )),
+            MaterializedTreeValue::AccessDenied(err) => Err(anyhow!(err))
+                .with_context(|| format!("access denied reading `{}`", path.display())),
         }
-
-        ensure_success("jj", &args, output)
-            .with_context(|| format!("failed to read `{path_arg}` at revision `{rev_arg}`"))?;
-        unreachable!("ensure_success returns on success or error")
     }
 
     pub fn set_bookmark(&self, name: &str, rev: &RevisionSummary) -> Result<()> {
-        let resolved = rev
-            .resolved
-            .as_deref()
-            .ok_or_else(|| anyhow!("bookmark `{name}` requires a resolved revision"))?;
-        let output = self
-            .jj(["bookmark", "set", name, "-r", resolved])?
-            .output()?;
-        ensure_success("jj", &["bookmark", "set", name, "-r", resolved], output)?;
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let commit = self.resolve_summary_to_commit(&workspace, &repo, rev)?;
+        let mut tx = repo.start_transaction();
+        tx.repo_mut()
+            .set_local_bookmark_target(name.as_ref(), RefTarget::normal(commit.id().clone()));
+        tx.commit(format!("set bookmark {name}")).block_on()?;
         Ok(())
     }
 
     pub fn clear_bookmark(&self, name: &str) -> Result<()> {
-        let output = self.jj(["bookmark", "delete", name])?.output()?;
-        ensure_success("jj", &["bookmark", "delete", name], output)?;
+        let (_, repo) = self.load_workspace_and_repo()?;
+        let mut tx = repo.start_transaction();
+        tx.repo_mut()
+            .set_local_bookmark_target(name.as_ref(), RefTarget::absent());
+        tx.commit(format!("clear bookmark {name}")).block_on()?;
         Ok(())
     }
 
@@ -130,98 +179,43 @@ impl JjClient {
         _base: &RevisionSummary,
         _home_state: &Path,
     ) -> Result<RevisionSummary> {
-        Err(anyhow!("create_or_refresh_import not implemented yet"))
+        Err(anyhow!(
+            "creating or refreshing an import from filesystem state is reserved for the next milestone"
+        ))
     }
 
     pub fn merge_revisions(
         &self,
-        _left: &RevisionSummary,
-        _right: &RevisionSummary,
+        left: &RevisionSummary,
+        right: &RevisionSummary,
     ) -> Result<RevisionSummary> {
-        Err(anyhow!("merge_revisions not implemented yet"))
+        self.create_merge_change(left, right, "dotmerge merge")
     }
 
     pub fn has_conflicts(&self, rev: &RevisionSummary) -> Result<bool> {
-        let rev_arg = self.rev_arg(rev);
-        let args = vec![
-            "log".to_string(),
-            "-r".to_string(),
-            rev_arg.to_string(),
-            "-T".to_string(),
-            "conflict".to_string(),
-            "--no-graph".to_string(),
-            "--quiet".to_string(),
-            "--color=never".to_string(),
-        ];
-        let output = self
-            .run_jj(args)
-            .with_context(|| format!("failed to check conflicts for revision `{rev_arg}`"))?;
-        let stdout = String::from_utf8(output.stdout).context("jj log returned invalid UTF-8")?;
-        let value = stdout.trim();
-        match value {
-            "true" => Ok(true),
-            "false" => Ok(false),
-            _ => Err(anyhow!(
-                "unexpected conflict status `{value}` for revision `{rev_arg}`"
-            )),
-        }
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let commit = self.resolve_summary_to_commit(&workspace, &repo, rev)?;
+        Ok(commit.has_conflict())
     }
 
     pub fn bookmark_summary(&self, name: &str) -> Result<BookmarkSummary> {
-        let args = vec![
-            "bookmark".to_string(),
-            "list".to_string(),
-            name.to_string(),
-            "--quiet".to_string(),
-            "--color=never".to_string(),
-        ];
-        let output = self
-            .run_jj(args)
-            .with_context(|| format!("failed to inspect bookmark `{name}`"))?;
-        let stdout =
-            String::from_utf8(output.stdout).context("jj bookmark list returned invalid UTF-8")?;
-        let mut lines = stdout
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty());
-        let first = match lines.next() {
-            Some(line) => line,
-            None => return Ok(BookmarkSummary::missing(name)),
-        };
-        if lines.next().is_some() {
-            return Err(anyhow!(
-                "bookmark pattern `{name}` matched more than one bookmark"
-            ));
+        let (_, repo) = self.load_workspace_and_repo()?;
+        let target = repo.view().get_local_bookmark(name.as_ref());
+        match target.as_resolved() {
+            Some(Some(commit_id)) => Ok(BookmarkSummary {
+                name: name.to_string(),
+                revision: Some(self.revision_summary(name, commit_id)),
+                exists: true,
+            }),
+            Some(None) => Ok(BookmarkSummary::missing(name)),
+            None => Err(anyhow!("local bookmark `{name}` is conflicted")),
         }
-
-        let listed_name = first
-            .split_once(':')
-            .map(|(bookmark_name, _)| bookmark_name.trim())
-            .filter(|bookmark_name| !bookmark_name.is_empty())
-            .ok_or_else(|| anyhow!("failed to parse bookmark listing for `{name}`"))?;
-        let revision = self
-            .resolve_rev(listed_name)
-            .with_context(|| format!("failed to resolve bookmark `{listed_name}`"))?;
-
-        Ok(BookmarkSummary {
-            name: listed_name.to_string(),
-            revision: Some(revision),
-            exists: true,
-        })
     }
 
     pub fn is_working_copy_clean(&self) -> Result<bool> {
-        let args = vec![
-            "status".to_string(),
-            "--quiet".to_string(),
-            "--color=never".to_string(),
-        ];
-        let output = self
-            .run_jj(args)
-            .context("failed to inspect working copy status")?;
-        let stdout =
-            String::from_utf8(output.stdout).context("jj status returned invalid UTF-8")?;
-        Ok(stdout.contains("The working copy has no changes."))
+        Err(anyhow!(
+            "working-copy cleanliness check is not implemented with jj-lib yet; refusing to assume the workspace is clean"
+        ))
     }
 
     pub fn create_new_change(
@@ -235,21 +229,30 @@ impl JjClient {
             ));
         }
 
-        let mut args = vec!["new".to_string(), "--no-edit".to_string()];
-        for parent in parents {
-            args.push(self.rev_arg(parent).to_string());
-        }
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let parent_commits = parents
+            .iter()
+            .map(|parent| self.resolve_summary_to_commit(&workspace, &repo, parent))
+            .collect::<Result<Vec<_>>>()?;
+        let parent_ids = parent_commits
+            .iter()
+            .map(|commit| commit.id().clone())
+            .collect::<Vec<_>>();
+        let tree = merge_commit_trees(repo.as_ref(), &parent_commits)
+            .block_on()
+            .context("failed to derive initial tree for new change")?;
 
-        let output = self
-            .run_jj(args.clone())
-            .context("failed to create a new jj change")?;
-        let new_rev = self
-            .parse_created_commit(&output)
-            .context("failed to determine the new jj revision from `jj new` output")?;
-        self.describe_revision(&new_rev, message)
-            .with_context(|| format!("failed to describe new revision `{new_rev}`"))?;
-        self.resolve_rev(&new_rev)
-            .with_context(|| format!("failed to resolve new revision `{new_rev}`"))
+        let mut tx = repo.start_transaction();
+        let commit = tx
+            .repo_mut()
+            .new_commit(parent_ids, tree)
+            .set_description(message)
+            .write()
+            .block_on()
+            .context("failed to write new commit")?;
+        tx.commit(format!("create commit {}", commit.id().hex()))
+            .block_on()?;
+        Ok(self.revision_summary(commit.id().hex(), commit.id()))
     }
 
     pub fn create_merge_change(
@@ -262,65 +265,166 @@ impl JjClient {
     }
 
     pub fn describe_current(&self, message: &str) -> Result<()> {
-        self.describe_revision("@", message)
-    }
-
-    fn verify_repo(&self) -> Result<()> {
-        let output = self.jj(["workspace", "list"])?.output()?;
-        ensure_success("jj", &["workspace", "list"], output)?;
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let current = self.resolve_commit_by_revset(&workspace, &repo, "@")?;
+        let mut tx = repo.start_transaction();
+        tx.repo_mut()
+            .rewrite_commit(&current)
+            .set_description(message)
+            .write()
+            .block_on()
+            .context("failed to rewrite current commit")?;
+        tx.repo_mut()
+            .rebase_descendants()
+            .block_on()
+            .context("failed to rebase descendants after rewriting current commit")?;
+        tx.commit("describe current commit").block_on()?;
         Ok(())
     }
 
-    fn describe_revision(&self, revset: &str, message: &str) -> Result<()> {
-        let args = vec![
-            "describe".to_string(),
-            revset.to_string(),
-            "-m".to_string(),
-            message.to_string(),
-        ];
-        self.run_jj(args)
-            .with_context(|| format!("failed to describe revision `{revset}`"))?;
-        Ok(())
+    fn load_workspace_and_repo(&self) -> Result<(Workspace, Arc<ReadonlyRepo>)> {
+        let workspace = Workspace::load(
+            &self.settings,
+            &self.workspace_root,
+            &StoreFactories::default(),
+            &default_working_copy_factories(),
+        )
+        .with_context(|| {
+            format!(
+                "failed to load jj workspace at `{}`",
+                self.workspace_root.display()
+            )
+        })?;
+        let repo = workspace
+            .repo_loader()
+            .load_at_head()
+            .block_on()
+            .context("failed to load repo state at operation head")?;
+        Ok((workspace, repo))
     }
 
-    fn run_jj(&self, args: Vec<String>) -> Result<Output> {
-        let output = self
-            .jj(args.iter().map(String::as_str))?
-            .output()
-            .with_context(|| format!("failed to run `jj {}`", args.join(" ")))?;
-        ensure_success("jj", &args, output)
+    fn resolve_summary_to_commit(
+        &self,
+        workspace: &Workspace,
+        repo: &Arc<ReadonlyRepo>,
+        rev: &RevisionSummary,
+    ) -> Result<Commit> {
+        if let Some(hex) = &rev.resolved {
+            let commit_id = CommitId::try_from_hex(hex)
+                .ok_or_else(|| anyhow!("invalid commit id `{hex}` stored in revision summary"))?;
+            return repo
+                .store()
+                .get_commit(&commit_id)
+                .with_context(|| format!("failed to load commit `{hex}`"));
+        }
+        self.resolve_commit_by_revset(workspace, repo, &rev.expression)
     }
 
-    fn rev_arg<'a>(&self, rev: &'a RevisionSummary) -> &'a str {
+    fn resolve_commit_by_revset(
+        &self,
+        workspace: &Workspace,
+        repo: &Arc<ReadonlyRepo>,
+        revset: &str,
+    ) -> Result<Commit> {
+        let extensions = RevsetExtensions::default();
+        let expression = self.parse_revset(revset, workspace, &extensions)?;
+        let symbol_resolver = SymbolResolver::new(repo.as_ref(), extensions.symbol_resolvers());
+        let resolved = expression
+            .resolve_user_expression(repo.as_ref(), &symbol_resolver)
+            .with_context(|| format!("failed to resolve revset `{revset}`"))?;
+        let evaluated = resolved
+            .evaluate(repo.as_ref())
+            .with_context(|| format!("failed to evaluate revset `{revset}`"))?;
+        let mut commits = evaluated.commit_change_ids();
+        let first = commits
+            .next()
+            .transpose()?
+            .ok_or_else(|| anyhow!("`{revset}` resolved to no revisions"))?;
+        if commits.next().transpose()?.is_some() {
+            return Err(anyhow!("`{revset}` resolved to more than one revision"));
+        }
+        repo.store()
+            .get_commit(&first.0)
+            .with_context(|| format!("failed to load commit for revset `{revset}`"))
+    }
+
+    fn parse_revset(
+        &self,
+        revset: &str,
+        workspace: &Workspace,
+        extensions: &RevsetExtensions,
+    ) -> Result<Arc<UserRevsetExpression>> {
+        let mut diagnostics = RevsetDiagnostics::new();
+        let aliases = RevsetAliasesMap::new();
+        let fileset_aliases = FilesetAliasesMap::new();
+        let ui = RepoPathUiConverter::Fs {
+            cwd: self.workspace_root.clone(),
+            base: self.workspace_root.clone(),
+        };
+        let context = RevsetParseContext {
+            aliases_map: &aliases,
+            local_variables: HashMap::new(),
+            user_email: self.settings.user_email(),
+            date_pattern_context: DatePatternContext::from(Local::now().fixed_offset()),
+            default_ignored_remote: None,
+            fileset_aliases_map: &fileset_aliases,
+            use_glob_by_default: true,
+            extensions,
+            workspace: Some(RevsetWorkspaceContext {
+                path_converter: &ui,
+                workspace_name: workspace.workspace_name(),
+            }),
+        };
+        parse(&mut diagnostics, revset, &context)
+            .with_context(|| format!("failed to parse revset `{revset}`"))
+    }
+
+    fn parse_repo_path(&self, path: &Path) -> Result<RepoPathBuf> {
+        RepoPathBuf::parse_fs_path(&self.workspace_root, &self.workspace_root, path).map_err(
+            |err| {
+                anyhow!(
+                    "failed to interpret `{}` as a repo-relative path: {err}",
+                    path.display()
+                )
+            },
+        )
+    }
+
+    fn revision_summary(
+        &self,
+        expression: impl Into<String>,
+        commit_id: &CommitId,
+    ) -> RevisionSummary {
+        RevisionSummary::resolved(expression, commit_id.hex())
+    }
+
+    fn rev_label<'a>(&self, rev: &'a RevisionSummary) -> &'a str {
         rev.resolved.as_deref().unwrap_or(&rev.expression)
     }
+}
 
-    fn parse_created_commit(&self, output: &Output) -> Result<String> {
-        let stderr =
-            String::from_utf8(output.stderr.clone()).context("jj new returned invalid UTF-8")?;
-        for line in stderr.lines().map(str::trim) {
-            if !line.starts_with("Created new commit ") {
-                continue;
-            }
+fn find_workspace_root(path: PathBuf) -> Result<PathBuf> {
+    let start = if path.is_dir() {
+        path
+    } else {
+        path.parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| anyhow!("`{}` has no parent directory", path.display()))?
+    };
 
-            let commit_id = line
-                .split_whitespace()
-                .nth(4)
-                .ok_or_else(|| anyhow!("missing commit id in `jj new` output: {line}"))?;
-            return Ok(commit_id.to_string());
+    for candidate in start.ancestors() {
+        if candidate.join(".jj").is_dir() {
+            return std::fs::canonicalize(candidate).with_context(|| {
+                format!(
+                    "failed to canonicalize workspace root `{}`",
+                    candidate.display()
+                )
+            });
         }
-
-        Err(anyhow!("`jj new` did not report the created commit"))
     }
 
-    fn jj<I, S>(&self, args: I) -> Result<Command>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<std::ffi::OsStr>,
-    {
-        let mut command = Command::new("jj");
-        command.current_dir(&self.repo_path);
-        command.args(args);
-        Ok(command)
-    }
+    Err(anyhow!(
+        "could not find a jj workspace root from `{}`",
+        start.display()
+    ))
 }
