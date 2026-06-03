@@ -1,7 +1,8 @@
-use crate::model::{BookmarkSummary, RevisionSummary};
+use crate::fs;
+use crate::model::{BookmarkSummary, ManagedEntry, RevisionSummary};
 use anyhow::{Context, Result, anyhow};
 use chrono::Local;
-use jj_lib::backend::CommitId;
+use jj_lib::backend::{CommitId, CopyId, TreeValue};
 use jj_lib::commit::Commit;
 use jj_lib::config::StackedConfig;
 use jj_lib::conflicts::{
@@ -14,7 +15,7 @@ use jj_lib::merge::SameChange;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::RefTarget;
 use jj_lib::repo::{ReadonlyRepo, Repo as _, StoreFactories};
-use jj_lib::repo_path::{RepoPathBuf, RepoPathUiConverter};
+use jj_lib::repo_path::{RepoPath, RepoPathBuf, RepoPathUiConverter};
 use jj_lib::revset::{
     RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions, RevsetParseContext,
     RevsetWorkspaceContext, SymbolResolver, UserRevsetExpression, parse,
@@ -22,10 +23,11 @@ use jj_lib::revset::{
 use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::settings::UserSettings;
 use jj_lib::time_util::DatePatternContext;
+use jj_lib::tree_builder::TreeBuilder;
 use jj_lib::tree_merge::MergeOptions;
 use jj_lib::workspace::{Workspace, default_working_copy_factories};
 use pollster::FutureExt as _;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -73,6 +75,16 @@ impl JjClient {
         Ok(self.revision_summary(revset, commit.id()))
     }
 
+    pub fn root_revision(&self) -> Result<RevisionSummary> {
+        let (_, repo) = self.load_workspace_and_repo()?;
+        let root = repo.store().root_commit();
+        Ok(self.revision_summary("empty-tree", root.id()))
+    }
+
+    pub fn current_revision(&self) -> Result<RevisionSummary> {
+        self.resolve_rev("@")
+    }
+
     pub fn read_tree(&self, rev: &RevisionSummary) -> Result<String> {
         let files = self.list_files(rev)?;
         Ok(files
@@ -95,78 +107,61 @@ impl JjClient {
         Ok(files)
     }
 
-    pub fn file_at_rev(&self, rev: &RevisionSummary, path: &Path) -> Result<Option<Vec<u8>>> {
+    pub fn read_entry_at_rev(
+        &self,
+        rev: &RevisionSummary,
+        path: &Path,
+    ) -> Result<Option<ManagedEntry>> {
         let (workspace, repo) = self.load_workspace_and_repo()?;
         let commit = self.resolve_summary_to_commit(&workspace, &repo, rev)?;
         let repo_path = self.parse_repo_path(path)?;
-        let tree = commit.tree();
-        let value = tree
-            .path_value(repo_path.as_ref())
-            .block_on()
+        self.read_entry_from_tree(repo.as_ref(), &commit.tree(), repo_path.as_ref(), path)
             .with_context(|| {
                 format!(
                     "failed to read `{}` from revision `{}`",
                     path.display(),
                     self.rev_label(rev)
                 )
-            })?;
-        let materialized =
-            materialize_tree_value(repo.store(), repo_path.as_ref(), value, tree.labels())
-                .block_on()
-                .with_context(|| {
-                    format!(
-                        "failed to materialize `{}` from revision `{}`",
-                        path.display(),
-                        self.rev_label(rev)
-                    )
-                })?;
+            })
+    }
 
-        match materialized {
-            MaterializedTreeValue::Absent => Ok(None),
-            MaterializedTreeValue::File(mut file) => file
-                .read_all(repo_path.as_ref())
-                .block_on()
-                .map(Some)
-                .with_context(|| {
-                    format!(
-                        "failed to read `{}` from revision `{}`",
-                        path.display(),
-                        self.rev_label(rev)
-                    )
-                }),
-            MaterializedTreeValue::FileConflict(file) => {
-                let bytes = materialize_merge_result_to_bytes(
-                    &file.contents,
-                    &file.labels,
-                    &ConflictMaterializeOptions {
-                        marker_style: ConflictMarkerStyle::Diff,
-                        marker_len: None,
-                        merge: MergeOptions {
-                            hunk_level: FileMergeHunkLevel::Line,
-                            same_change: SameChange::Accept,
-                        },
-                    },
-                );
-                Ok(Some(bytes.to_vec()))
+    pub fn read_entries_at_rev(
+        &self,
+        rev: &RevisionSummary,
+        paths: &BTreeSet<PathBuf>,
+    ) -> Result<BTreeMap<PathBuf, Option<ManagedEntry>>> {
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let commit = self.resolve_summary_to_commit(&workspace, &repo, rev)?;
+        let tree = commit.tree();
+        let mut entries = BTreeMap::new();
+
+        for path in paths {
+            let repo_path = self.parse_repo_path(path)?;
+            let entry =
+                self.read_entry_from_tree(repo.as_ref(), &tree, repo_path.as_ref(), path)?;
+            entries.insert(path.clone(), entry);
+        }
+
+        Ok(entries)
+    }
+
+    pub fn file_at_rev(&self, rev: &RevisionSummary, path: &Path) -> Result<Option<Vec<u8>>> {
+        match self.read_entry_at_rev(rev, path)? {
+            Some(ManagedEntry::File { contents, .. }) => Ok(Some(contents)),
+            Some(ManagedEntry::Symlink { target }) => {
+                Ok(Some(target.to_string_lossy().into_owned().into_bytes()))
             }
-            MaterializedTreeValue::Symlink { target, .. } => Ok(Some(target.into_bytes())),
-            MaterializedTreeValue::Tree(_) => Err(anyhow!(
-                "`{}` is a directory in `{}`",
+            Some(ManagedEntry::Conflict) => Err(anyhow!(
+                "`{}` has unresolved conflicts in `{}`",
                 path.display(),
                 self.rev_label(rev)
             )),
-            MaterializedTreeValue::GitSubmodule(_) => Err(anyhow!(
-                "`{}` is a git submodule in `{}`",
+            Some(ManagedEntry::Unsupported { kind }) => Err(anyhow!(
+                "`{}` is unsupported as `{kind}` in `{}`",
                 path.display(),
                 self.rev_label(rev)
             )),
-            MaterializedTreeValue::OtherConflict { .. } => Err(anyhow!(
-                "`{}` has a non-file conflict in `{}`",
-                path.display(),
-                self.rev_label(rev)
-            )),
-            MaterializedTreeValue::AccessDenied(err) => Err(anyhow!(err))
-                .with_context(|| format!("access denied reading `{}`", path.display())),
+            None => Ok(None),
         }
     }
 
@@ -189,14 +184,119 @@ impl JjClient {
         Ok(())
     }
 
+    pub fn complete_sync(&self, exported: &RevisionSummary) -> Result<()> {
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let commit = self.resolve_summary_to_commit(&workspace, &repo, exported)?;
+        let mut tx = repo.start_transaction();
+        tx.repo_mut().set_local_bookmark_target(
+            "last-sync".as_ref(),
+            RefTarget::normal(commit.id().clone()),
+        );
+        tx.repo_mut()
+            .set_local_bookmark_target("current-import".as_ref(), RefTarget::absent());
+        tx.commit("complete dotmerge sync").block_on()?;
+        Ok(())
+    }
+
     pub fn create_or_refresh_import(
         &self,
-        _base: &RevisionSummary,
-        _home_state: &Path,
+        base: &RevisionSummary,
+        home_state: &Path,
+        managed_paths: &BTreeSet<PathBuf>,
     ) -> Result<RevisionSummary> {
-        Err(anyhow!(
-            "creating or refreshing an import from filesystem state is reserved for the next milestone"
-        ))
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let base_commit = self.resolve_summary_to_commit(&workspace, &repo, base)?;
+        let base_tree_id = base_commit
+            .tree_ids()
+            .as_resolved()
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "base revision `{}` must have a resolved tree",
+                    self.rev_label(base)
+                )
+            })?;
+
+        let mut builder = TreeBuilder::new(repo.store().clone(), base_tree_id);
+        for path in managed_paths {
+            let repo_path = self.parse_repo_path(path)?;
+            match fs::read_rooted_entry(home_state, path)? {
+                Some(ManagedEntry::File {
+                    contents,
+                    executable,
+                }) => {
+                    let file_id = repo
+                        .store()
+                        .write_file(repo_path.as_ref(), &mut contents.as_slice())
+                        .block_on()
+                        .with_context(|| {
+                            format!(
+                                "failed to write imported file `{}` to the jj store",
+                                path.display()
+                            )
+                        })?;
+                    builder.set(
+                        repo_path,
+                        TreeValue::File {
+                            id: file_id,
+                            executable,
+                            copy_id: CopyId::placeholder(),
+                        },
+                    );
+                }
+                Some(ManagedEntry::Symlink { target }) => {
+                    let target = target.to_str().ok_or_else(|| {
+                        anyhow!("symlink target for `{}` is not valid UTF-8", path.display())
+                    })?;
+                    let symlink_id = repo
+                        .store()
+                        .write_symlink(repo_path.as_ref(), target)
+                        .block_on()
+                        .with_context(|| {
+                            format!(
+                                "failed to write imported symlink `{}` to the jj store",
+                                path.display()
+                            )
+                        })?;
+                    builder.set(repo_path, TreeValue::Symlink(symlink_id));
+                }
+                Some(ManagedEntry::Conflict) => {
+                    return Err(anyhow!(
+                        "cannot import unresolved conflict from `$HOME` at `{}`",
+                        path.display()
+                    ));
+                }
+                Some(ManagedEntry::Unsupported { kind }) => {
+                    return Err(anyhow!(
+                        "cannot import `{}` from `$HOME` because it is a {kind}",
+                        path.display()
+                    ));
+                }
+                None => builder.remove(repo_path),
+            }
+        }
+
+        let imported_tree_id = builder
+            .write_tree()
+            .block_on()
+            .context("failed to materialize imported tree")?;
+        let imported_tree =
+            jj_lib::merged_tree::MergedTree::resolved(repo.store().clone(), imported_tree_id);
+
+        let mut tx = repo.start_transaction();
+        let commit = tx
+            .repo_mut()
+            .new_commit(vec![base_commit.id().clone()], imported_tree)
+            .set_description("dotmerge import from home")
+            .write()
+            .block_on()
+            .context("failed to write imported commit")?;
+        tx.repo_mut().set_local_bookmark_target(
+            "current-import".as_ref(),
+            RefTarget::normal(commit.id().clone()),
+        );
+        tx.commit("refresh current-import").block_on()?;
+        Ok(self.revision_summary("current-import", commit.id()))
     }
 
     pub fn merge_revisions(
@@ -228,9 +328,51 @@ impl JjClient {
     }
 
     pub fn is_working_copy_clean(&self) -> Result<bool> {
-        Err(anyhow!(
-            "working-copy cleanliness check is not implemented with jj-lib yet; refusing to assume the workspace is clean"
-        ))
+        let current = self.current_revision()?;
+        let tracked_paths = self.list_files(&current)?;
+        let repo_paths = fs::list_repo_paths(self.repo_path())?;
+        let mut managed_paths = tracked_paths.into_iter().collect::<BTreeSet<_>>();
+        managed_paths.extend(repo_paths);
+
+        let current_entries = self.read_entries_at_rev(&current, &managed_paths)?;
+        for path in managed_paths {
+            let fs_entry = fs::read_rooted_entry(self.repo_path(), &path)?;
+            let tree_entry = current_entries.get(&path).cloned().flatten();
+            if tree_entry != fs_entry {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    pub fn is_ancestor(
+        &self,
+        ancestor: &RevisionSummary,
+        descendant: &RevisionSummary,
+    ) -> Result<bool> {
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let ancestor_commit = self.resolve_summary_to_commit(&workspace, &repo, ancestor)?;
+        let descendant_commit = self.resolve_summary_to_commit(&workspace, &repo, descendant)?;
+        repo.index()
+            .is_ancestor(ancestor_commit.id(), descendant_commit.id())
+            .context("failed to query jj ancestry")
+    }
+
+    pub fn checkout_revision(&self, rev: &RevisionSummary) -> Result<()> {
+        let (mut workspace, repo) = self.load_workspace_and_repo()?;
+        let commit = self.resolve_summary_to_commit(&workspace, &repo, rev)?;
+        let mut tx = repo.start_transaction();
+        tx.repo_mut()
+            .edit(workspace.workspace_name().to_owned(), &commit)
+            .block_on()
+            .context("failed to update the workspace commit")?;
+        let new_repo = tx.commit("update working copy for dotmerge").block_on()?;
+        workspace
+            .check_out(new_repo.op_id().clone(), None, &commit)
+            .block_on()
+            .context("failed to check out prepared revision into the repo working copy")?;
+        Ok(())
     }
 
     pub fn create_new_change(
@@ -277,24 +419,6 @@ impl JjClient {
         message: &str,
     ) -> Result<RevisionSummary> {
         self.create_new_change(&[left.clone(), right.clone()], message)
-    }
-
-    pub fn describe_current(&self, message: &str) -> Result<()> {
-        let (workspace, repo) = self.load_workspace_and_repo()?;
-        let current = self.resolve_commit_by_revset(&workspace, &repo, "@")?;
-        let mut tx = repo.start_transaction();
-        tx.repo_mut()
-            .rewrite_commit(&current)
-            .set_description(message)
-            .write()
-            .block_on()
-            .context("failed to rewrite current commit")?;
-        tx.repo_mut()
-            .rebase_descendants()
-            .block_on()
-            .context("failed to rebase descendants after rewriting current commit")?;
-        tx.commit("describe current commit").block_on()?;
-        Ok(())
     }
 
     fn load_workspace_and_repo(&self) -> Result<(Workspace, Arc<ReadonlyRepo>)> {
@@ -403,6 +527,60 @@ impl JjClient {
                 )
             },
         )
+    }
+
+    fn read_entry_from_tree(
+        &self,
+        repo: &ReadonlyRepo,
+        tree: &jj_lib::merged_tree::MergedTree,
+        repo_path: &RepoPath,
+        display_path: &Path,
+    ) -> Result<Option<ManagedEntry>> {
+        let value = tree.path_value(repo_path).block_on().with_context(|| {
+            format!("failed to load tree value for `{}`", display_path.display())
+        })?;
+        let materialized =
+            materialize_tree_value(repo.store(), repo_path, value, tree.labels()).block_on()?;
+
+        match materialized {
+            MaterializedTreeValue::Absent => Ok(None),
+            MaterializedTreeValue::File(mut file) => Ok(Some(ManagedEntry::File {
+                contents: file.read_all(repo_path).block_on().with_context(|| {
+                    format!(
+                        "failed to read file content for `{}`",
+                        display_path.display()
+                    )
+                })?,
+                executable: file.executable,
+            })),
+            MaterializedTreeValue::Symlink { target, .. } => Ok(Some(ManagedEntry::Symlink {
+                target: PathBuf::from(target),
+            })),
+            MaterializedTreeValue::FileConflict(file) => {
+                let _ = materialize_merge_result_to_bytes(
+                    &file.contents,
+                    &file.labels,
+                    &ConflictMaterializeOptions {
+                        marker_style: ConflictMarkerStyle::Diff,
+                        marker_len: None,
+                        merge: MergeOptions {
+                            hunk_level: FileMergeHunkLevel::Line,
+                            same_change: SameChange::Accept,
+                        },
+                    },
+                );
+                Ok(Some(ManagedEntry::Conflict))
+            }
+            MaterializedTreeValue::OtherConflict { .. } => Ok(Some(ManagedEntry::Conflict)),
+            MaterializedTreeValue::Tree(_) => Ok(Some(ManagedEntry::Unsupported {
+                kind: "directory".to_string(),
+            })),
+            MaterializedTreeValue::GitSubmodule(_) => Ok(Some(ManagedEntry::Unsupported {
+                kind: "git submodule".to_string(),
+            })),
+            MaterializedTreeValue::AccessDenied(err) => Err(anyhow!(err))
+                .with_context(|| format!("access denied reading `{}`", display_path.display())),
+        }
     }
 
     fn revision_summary(

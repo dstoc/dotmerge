@@ -3,6 +3,8 @@ mod cli;
 mod fs;
 mod jj;
 mod model;
+mod status;
+mod sync;
 mod util;
 
 use anyhow::Result;
@@ -26,12 +28,12 @@ fn run() -> Result<()> {
     }
 }
 
-fn handle_status(_args: cli::StatusArgs) -> Result<()> {
-    Err(util::not_implemented("status"))
+fn handle_status(args: cli::StatusArgs) -> Result<()> {
+    status::run(args)
 }
 
-fn handle_sync(_args: cli::SyncArgs) -> Result<()> {
-    Err(util::not_implemented("sync"))
+fn handle_sync(args: cli::SyncArgs) -> Result<()> {
+    sync::run(args)
 }
 
 fn handle_add(args: cli::AddArgs) -> Result<()> {
