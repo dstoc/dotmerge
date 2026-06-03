@@ -52,6 +52,21 @@ impl JjClient {
         &self.workspace_root
     }
 
+    pub fn working_copy_path(&self, repo_relative: &Path) -> Result<PathBuf> {
+        if repo_relative.as_os_str().is_empty() {
+            return Err(anyhow!("repo-relative path must not be empty"));
+        }
+        if repo_relative.is_absolute() {
+            return Err(anyhow!(
+                "repo-relative path must not be absolute: `{}`",
+                repo_relative.display()
+            ));
+        }
+
+        self.parse_repo_path(repo_relative)?;
+        Ok(self.workspace_root.join(repo_relative))
+    }
+
     pub fn resolve_rev(&self, revset: &str) -> Result<RevisionSummary> {
         let (workspace, repo) = self.load_workspace_and_repo()?;
         let commit = self.resolve_commit_by_revset(&workspace, &repo, revset)?;

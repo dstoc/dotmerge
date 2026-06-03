@@ -1,4 +1,6 @@
+mod add;
 mod cli;
+mod fs;
 mod jj;
 mod model;
 mod util;
@@ -32,6 +34,6 @@ fn handle_sync(_args: cli::SyncArgs) -> Result<()> {
     Err(util::not_implemented("sync"))
 }
 
-fn handle_add(_args: cli::AddArgs) -> Result<()> {
-    Err(util::not_implemented("add"))
+fn handle_add(args: cli::AddArgs) -> Result<()> {
+    add::run(args)
 }

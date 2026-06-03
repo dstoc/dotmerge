@@ -97,3 +97,17 @@ impl SyncStatusSummary {
         }
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AddSourceKind {
+    File { mode: u32 },
+    Symlink { target: PathBuf },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedAddSource {
+    pub input_path: PathBuf,
+    pub source_path: PathBuf,
+    pub repo_path: PathBuf,
+    pub kind: AddSourceKind,
+}
