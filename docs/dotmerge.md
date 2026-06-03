@@ -1,0 +1,719 @@
+## Proposal: `dotmerge`
+
+`dotmerge` is a small jj-native dotfile sync tool.
+
+The selected repo root maps directly onto `$HOME`:
+
+```text
+repo/.zshrc              <->  ~/.zshrc
+repo/.config/sway/config <->  ~/.config/sway/config
+repo/bin/foo             <->  ~/bin/foo
+```
+
+`$HOME` is **not** a jj/git worktree, and files are copied rather than symlinked.
+
+The core idea is:
+
+```text
+base   = last-sync, or the empty tree on first sync
+target = revision to merge with, passed explicitly to each command
+repo   = repo root, passed explicitly to each command
+home   = actual filesystem
+```
+
+`last-sync` is a local jj bookmark recording the last revision known to match this clone's paired home directory.
+
+`current-import` is a local jj bookmark recording the current imported home state being merged.
+
+It is not meant to be pushed or shared between machines.
+
+---
+
+## MVP goals
+
+The MVP should be conservative, explicit, and hard to accidentally corrupt `$HOME`.
+
+It should support:
+
+```text
+dotmerge status --target REV --repo PATH
+dotmerge sync --target REV --repo PATH
+dotmerge sync --no-export --target REV --repo PATH
+dotmerge add PATH... --repo PATH
+```
+
+No templating, no scripts, no host-specific variants, no automatic background commits, no fancy merge UI.
+
+---
+
+## State model
+
+The sync state is recorded in local jj bookmarks:
+
+```text
+last-sync
+current-import
+```
+
+Meaning:
+
+```text
+last-sync      = the last revision known to match this local home directory
+current-import = the current imported home snapshot being merged
+```
+
+The target revision is not implicit in the MVP.
+
+The user must pass it explicitly to commands that need it, for example:
+
+```text
+--target origin/main
+```
+
+`--target` must resolve to exactly one revision.
+
+For `sync` and `sync --no-export`, a "clean repo working copy" means there are no unrelated repo edits outside the current dotmerge sync state.
+
+Normally the three important states are:
+
+```text
+base   = jj revision last-sync
+target = jj revision passed by --target
+repo   = filesystem path passed by --repo
+home   = filesystem under $HOME
+```
+
+On first sync, substitute the empty tree for `last-sync`.
+
+On first use, `last-sync` may not exist yet.
+
+In that case, `dotmerge` should treat the base as:
+
+```text
+the empty tree
+```
+
+So initial sync becomes:
+
+```text
+empty tree -> import current managed home state -> merge with target -> export
+```
+
+The critical invariant is:
+
+```text
+last-sync only moves after a successful export to home
+```
+
+Intermediate imported or merged revisions are not automatically the new last-sync revision.
+
+`current-import` is allowed to move during sync retries as home state changes.
+
+---
+
+## Sync model
+
+`dotmerge sync --target REV --repo PATH` should be thought of as:
+
+```text
+import home changes onto base
+merge imported state with target
+update the repo working copy to the sync state
+export merged result back to home
+advance last-sync to the exported revision
+```
+
+That is different from a simple file-by-file copier.
+
+The repo history becomes the source of truth for reconciliation, while `$HOME` remains an external filesystem projection.
+
+`current-import` is the mechanism that lets `dotmerge` resume a previously interrupted sync without guessing which repo revision represents the imported home state.
+
+For MVP, `dotmerge` assumes the managed files in `$HOME` are not being modified concurrently during a run.
+
+If they are, behavior is undefined.
+
+---
+
+## Managed paths
+
+`dotmerge` should not use include/exclude config.
+
+Instead, managed paths are derived from jj trees.
+
+For normal sync, a path is managed if it appears in:
+
+- the base revision
+- the target revision
+- an explicitly added local path being admitted for import
+
+This means:
+
+- existing tracked dotfiles come from the jj history itself
+- deletions remain visible as long as they are present in base or target
+- random files elsewhere in `$HOME` are ignored
+
+Unmanaged files in `$HOME` should be ignored completely by `status`, `sync --no-export`, and `sync`.
+
+New local files are not imported automatically just because they exist in `$HOME`.
+
+To admit a new local file into sync, the user must explicitly add it:
+
+```text
+dotmerge add PATH --repo ~/dotmerge-repo
+```
+
+That keeps ordinary sync conservative and avoids accidental imports from unrelated home-directory churn.
+
+---
+
+## Sync phases
+
+### 1. Import
+
+Import answers:
+
+```text
+what changed in home since last-sync?
+```
+
+Conceptually:
+
+```text
+base -> home
+```
+
+The import phase should:
+
+- compare managed paths in `$HOME` against `last-sync`
+- detect additions, modifications, and deletions
+- materialize those home changes as a jj working-copy change or commit on top of `last-sync`
+- move `current-import` to that imported revision
+
+If there are no home changes, import is a no-op.
+
+If `last-sync` does not exist yet, import should compare `$HOME` against the empty tree and materialize a home snapshot revision.
+
+If `current-import` already exists from a previous interrupted sync, rerunning `dotmerge sync` should refresh that imported revision from the current managed `$HOME` state rather than starting from scratch.
+
+`current-import` represents imported home state, not a fixed target choice, so it may be reused even if the user reruns `dotmerge sync` with a different `--target`.
+
+After resolving conflicts in jj, the user may rerun `dotmerge sync` directly as long as the repo still satisfies the sync resumability checks.
+
+On initial sync, the imported home snapshot should still be limited to managed paths. It should not blindly import all of `$HOME`.
+
+In practice, that means:
+
+- paths already present in the target revision are in scope automatically
+- additional local-only paths require `dotmerge add PATH`
+- if a managed path is missing from `$HOME`, treat that as a home-side deletion candidate
+
+Important constraint:
+
+```text
+the imported revision is not yet last-sync
+```
+
+It only represents:
+
+```text
+base plus local home edits
+```
+
+On first sync, that means:
+
+```text
+empty tree plus current managed home contents
+```
+
+Open question for the MVP:
+
+```text
+should dotmerge require a clean working copy before import?
+```
+
+For MVP, yes.
+
+`dotmerge sync` should require a clean jj working copy in `--repo` before it begins.
+
+That means:
+
+- no unrelated local repo edits are present
+- any non-empty repo state is part of the current dotmerge sync state
+- `dotmerge` does not have to guess how to combine sync state with user-authored repo changes
+- interrupted sync state is tracked via `current-import`, not via arbitrary dirty working-copy content
+
+For MVP, `dotmerge` should prefer erroring over trying to be clever.
+
+### 2. Merge
+
+Merge answers:
+
+```text
+how do local home edits combine with the target revision?
+```
+
+Conceptually:
+
+```text
+merge(base+home-edits, target)
+```
+
+This phase should:
+
+- take the imported revision
+- merge it with the revision passed via `--target`
+- ask jj whether the merge result contains conflicts
+- stop if jj reports conflicts
+- let the user inspect and resolve conflicts using normal jj workflows
+
+The user may then create or finalize a merge commit.
+
+This means conflict resolution happens in jj first, not while writing into `$HOME`.
+
+That is a good property: it keeps merge logic in the VCS layer and keeps home export conservative.
+
+If the imported or merged change is tree-identical to an existing revision that already represents the desired result, `dotmerge` may abandon the redundant change and reuse the existing revision instead.
+
+The merge should conceptually be:
+
+```text
+merge(current-import, target)
+```
+
+### 3. Export
+
+Export answers:
+
+```text
+how do we make home match the merged revision?
+```
+
+Conceptually:
+
+```text
+merged revision -> home
+```
+
+The export phase should:
+
+- copy managed files from the merged revision into `$HOME`
+- write home files atomically
+- create parent directories as needed
+- preserve executable bits
+- never overwrite unresolved conflicts
+
+If export succeeds completely, then:
+
+```text
+last-sync -> exported merged revision
+```
+
+If export fails, `last-sync` must not move.
+
+After a successful export, `current-import` should be cleared.
+
+Export should be atomic per file, but not necessarily across the whole sync.
+
+That means an export failure may leave some home files already updated while others are not.
+
+---
+
+## Command behavior
+
+### `dotmerge status --target REV --repo PATH`
+
+Shows where the three sync phases stand without changing anything.
+
+It should inspect the current `$HOME` state directly each time it runs.
+
+It should hard error if `--target` does not resolve to exactly one revision.
+
+Status should report:
+
+- whether `last-sync` exists
+- whether `current-import` exists
+- if it does not exist, that initial sync will use the empty tree as base
+- whether `$HOME` differs from `last-sync`
+- whether the target revision differs from `last-sync`
+- whether an existing `current-import` is cleanly resumable
+- whether the current sync state contains jj conflicts
+- whether import and/or merge state already exists in the repo
+- whether deletion candidates are present
+- whether a sync would require import, merge, export, or conflict resolution
+
+Example high-level output:
+
+```text
+base:   last-sync          = qpvuntsm
+import: current-import     = kmnopqrs (exists, will update)
+merge:  prepared at @      (exists)
+target: origin/main        = mzytrlsq
+repo:   ~/dotmerge-repo
+
+home changes since base:
+  modified .zshrc
+  added    .config/kitty/kitty.conf
+
+target changes since base:
+  modified .config/sway/config
+
+sync plan:
+  import home changes
+  merge with target
+  export merged result to $HOME
+```
+
+If conflicts are expected or already present, status should say so explicitly.
+
+It does not need to enumerate every managed path in the MVP. A concise summary like the example above is sufficient.
+
+If deletion candidates are present, status should mention that explicitly.
+
+If `last-sync` does not exist yet, status should say that this is an initial sync from the empty tree.
+
+If `current-import` exists, status should report whether resume preconditions hold:
+
+- the repo working copy is clean
+- `last-sync` is an ancestor of `current-import`, or the empty-tree init case applies
+- `current-import` is an ancestor of `@`, or equal to `@`
+- `current-import` is not an ancestor of the requested target revision
+
+Here, "repo working copy is clean" means there are no unrelated repo edits outside the current dotmerge sync state.
+
+If any resumability check fails, status should report which check failed.
+
+### `dotmerge sync --no-export --target REV --repo PATH`
+
+Runs the repo-side parts of sync but stops before writing to `$HOME`.
+
+It should require the same clean-repo preconditions as `dotmerge sync`.
+
+It should hard error if `--target` does not resolve to exactly one revision.
+
+It should:
+
+- create or refresh `current-import`
+- perform the merge against the requested target
+- leave any resulting conflict state in the repo for the user to resolve
+- leave the prepared sync state in place for a later full `dotmerge sync`
+- update the repo working copy to the prepared merge result
+- not export to `$HOME`
+- not move `last-sync`
+
+A later full `dotmerge sync` should still refresh `current-import` again from the current managed `$HOME` state before exporting.
+
+After it completes, it should show status-style summary output for the prepared state.
+
+### `dotmerge sync --target REV --repo PATH`
+
+Performs the full workflow:
+
+```text
+import -> merge -> export
+```
+
+Suggested behavior:
+
+1. Verify preconditions.
+   - the repo at `--repo` must have a clean jj working copy
+   - if `current-import` exists, it must satisfy the resume preconditions reported by `status`
+   - otherwise, error, report which check failed, and require manual repair; do not silently discard or rewrite `current-import`
+2. Resolve the sync base:
+   - `last-sync`, if it exists
+   - otherwise the empty tree
+3. Create or refresh `current-import` from the current managed home state on top of that base.
+4. Merge `current-import` with the target revision.
+5. If merge conflicts exist, stop and report them, leaving `current-import` in place.
+6. If the user later resolves those conflicts in jj and reruns `dotmerge sync`, `dotmerge` should refresh `current-import` again from the latest managed home state and recompute the merge.
+7. If the merge result is clean, export it to `$HOME`.
+8. Only after successful export, move `last-sync` to the exported revision.
+9. Clear `current-import`.
+
+After a successful sync, leave the repo working copy at the final merged/exported revision.
+
+After it completes, it should show status-style summary output for the new synced state.
+
+If the imported change or merge result is redundant because its tree already matches an existing revision, `dotmerge` may abandon that temporary change and reuse the existing revision.
+
+`dotmerge sync` should not silently auto-commit unrelated repo state.
+
+`dotmerge sync` is allowed to update the repo working copy as part of creating, refreshing, and merging sync state.
+
+If sync stops on conflicts, it should leave the repo working copy at the conflicted merge state for the user to resolve there.
+
+If the import or merge step requires the user to confirm or finalize a commit, that should be explicit.
+
+For MVP, it is acceptable if conflict resolution is manual and requires rerunning `dotmerge sync` after jj conflicts are resolved.
+
+### `dotmerge add PATH... --repo PATH`
+
+Admits one or more new local files into sync.
+
+This is the escape hatch for files that exist in `$HOME` but are not yet tracked by the target tree.
+
+`dotmerge add` is separate from `dotmerge sync`.
+
+It is a repo-editing workflow, not a sync workflow.
+
+It does not require a clean repo working copy.
+
+Conceptually, it is just a helper for copying one or more home files into the corresponding repo-relative paths.
+
+Suggested behavior:
+
+1. Verify that each `PATH` is inside `$HOME`.
+2. Verify that each `PATH` is a file and currently exists in `$HOME`.
+3. Verify that each corresponding repo-relative path does not already exist in the repo.
+4. Copy or stage each file into the repo working copy selected by `--repo` at the corresponding repo-relative path.
+5. Make those files visible to the next import/merge/export cycle.
+
+When copying into the repo, `dotmerge add` should preserve executable bits and symlink identity.
+
+`PATH` may be absolute or home-relative, as long as it resolves unambiguously inside `$HOME`.
+
+`dotmerge add` should be explicit and narrow. It is how new local files enter the managed set.
+
+If the path already exists in the repo, `dotmerge add` should error and direct the user to use `dotmerge sync` instead.
+
+If any requested path is invalid, `dotmerge add` should fail the whole command without partially adding files.
+
+A normal flow could be:
+
+1. `dotmerge add` one or more new files
+2. inspect the repo changes
+3. commit them in jj
+4. run `dotmerge sync --target ... --repo ...`
+
+## Config
+
+The MVP should not require a config file.
+
+For now, the caller must pass:
+
+- `--repo PATH`
+- `--target REV` for `status` and `sync`
+
+Later, a config file can provide defaults for these.
+
+---
+
+## jj integration
+
+Use `jj-lib` for the MVP.
+
+This design now depends on first-class access to:
+
+- revisions and revision expressions
+- trees and tree equality
+- bookmark read/write operations
+- creating or refreshing imported changes
+- merge results and conflict state
+
+That is a better fit for the jj library layer than for parsing CLI output from subprocesses.
+
+The tool should not depend on Git refs directly.
+
+The underlying repo may be Git-backed, but `dotmerge` should speak jj through `jj-lib`.
+
+Suggested internal capabilities:
+
+```rust
+struct JjRepo;
+
+impl JjRepo {
+    fn open(repo_path: &Path) -> Result<Self>;
+    fn resolve_rev(&self, revset: &str) -> Result<CommitId>;
+    fn read_tree(&self, rev: &CommitId) -> Result<TreeId>;
+    fn set_bookmark(&mut self, name: &str, rev: &CommitId) -> Result<()>;
+    fn clear_bookmark(&mut self, name: &str) -> Result<()>;
+    fn create_or_refresh_import(
+        &mut self,
+        base: &CommitId,
+        home_state: &HomeState,
+    ) -> Result<CommitId>;
+    fn merge_revisions(
+        &mut self,
+        left: &CommitId,
+        right: &CommitId,
+    ) -> Result<CommitId>;
+    fn has_conflicts(&self, rev: &CommitId) -> Result<bool>;
+}
+```
+
+Keep the rest of `dotmerge` behind this abstraction rather than spreading `jj-lib` details throughout the codebase.
+
+If `--repo` does not point to a valid jj repo, `dotmerge` should hard error.
+
+If `--target` does not resolve to exactly one revision, `dotmerge` should hard error.
+
+---
+
+## Conflict handling in MVP
+
+MVP should ask jj for conflict state and hand conflict resolution off to jj.
+
+A conflict means some managed path changed both:
+
+- in local home edits since `last-sync`, and
+- in the target revision since `last-sync`
+
+If `last-sync` does not exist yet, conflicts mean:
+
+- the imported home snapshot changed a path from the empty-tree base, and
+- the target revision also changed that path from the empty-tree base
+
+For a conflict, report something like:
+
+```text
+conflict .config/git/config
+
+local home changed since last-sync
+target changed since last-sync
+
+resolve in jj, then rerun dotmerge sync
+```
+
+On initial sync, this should still be treated as a normal jj merge conflict. Only the wording should differ, referring to the empty-tree base rather than to `last-sync`.
+
+When rerun after conflict resolution, `dotmerge sync` should:
+
+- locate `current-import`
+- refresh it from the current managed `$HOME` state
+- recompute the merge against the requested target
+- stop again if new conflicts appear
+- otherwise continue to export
+
+The user is expected to resolve conflicts in jj and then rerun `dotmerge sync`.
+
+For MVP, it is acceptable to leave all conflict resolution manual.
+
+Later, add:
+
+```text
+dotmerge sync --target-wins
+dotmerge sync --home-wins
+dotmerge merge
+dotmerge reset-import
+```
+
+But not needed initially.
+
+---
+
+## File handling rules
+
+MVP should support:
+
+```text
+regular files
+directories
+symlinks
+executable bit
+missing files
+```
+
+For safety:
+
+```text
+write home files atomically
+create parent directories as needed
+never overwrite unresolved conflicts
+never delete home files unless explicitly supported later
+preserve executable bit from exported revision -> home
+```
+
+Modification times are not part of sync semantics.
+
+Deletion can wait.
+
+Deletion semantics are still tricky:
+
+```text
+home deleted since base
+target deleted since base
+both deleted
+deleted on one side, modified on the other
+```
+
+For MVP, report deletion candidates but require a later explicit design.
+
+---
+
+## Implementation language
+
+Build the MVP in **Rust**.
+
+Shell is fine for a quick spike, but this tool writes into `$HOME`, tracks path mappings, stages imported filesystem content, and needs careful error handling. Rust will make the real version easier to test and safer to evolve.
+
+Suggested crate shape:
+
+```text
+src/main.rs
+src/config.rs
+src/jj.rs
+src/import.rs
+src/merge.rs
+src/export.rs
+src/fs.rs
+src/status.rs
+```
+
+Internal model could look like:
+
+```rust
+struct SyncPlan {
+    base_rev: String,
+    target_rev: String,
+    has_home_changes: bool,
+    requires_merge: bool,
+    export_paths: Vec<std::path::PathBuf>,
+}
+```
+
+And the jj layer can stay simple:
+
+```rust
+struct Jj;
+
+impl Jj {
+    fn file_at_rev(&self, rev: &str, path: &Path) -> Result<Option<Vec<u8>>>;
+    fn new_from_rev(&self, rev: &str) -> Result<()>;
+    fn set_bookmark(&self, name: &str, rev: &str) -> Result<()>;
+}
+```
+
+No jj library integration needed for MVP.
+
+---
+
+## Deferred features
+
+Leave these out initially:
+
+```text
+automatic commits
+interactive merge UI
+templating
+host-specific files
+secret management
+script hooks
+push/pull integration
+per-path last-sync state
+syncing last-sync markers across machines
+full deletion support
+binary merge handling
+watch mode
+```
+
+Those can come later if the core model feels good.
+
+---
+
+## MVP summary
+
+`dotmerge` should start as:
+
+```text
+a conservative jj-backed import/merge/export tool for dotfiles
+```
