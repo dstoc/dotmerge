@@ -206,6 +206,8 @@ impl JjClient {
     ) -> Result<RevisionSummary> {
         let (workspace, repo) = self.load_workspace_and_repo()?;
         let base_commit = self.resolve_summary_to_commit(&workspace, &repo, base)?;
+        let current_commit = self.resolve_commit_by_revset(&workspace, &repo, "@")?;
+        let current_import = self.bookmark_summary("current-import")?;
         let base_tree_id = base_commit
             .tree_ids()
             .as_resolved()
@@ -280,17 +282,33 @@ impl JjClient {
             .write_tree()
             .block_on()
             .context("failed to materialize imported tree")?;
+
         let imported_tree =
             jj_lib::merged_tree::MergedTree::resolved(repo.store().clone(), imported_tree_id);
-
         let mut tx = repo.start_transaction();
-        let commit = tx
-            .repo_mut()
-            .new_commit(vec![base_commit.id().clone()], imported_tree)
-            .set_description("dotmerge import from home")
-            .write()
-            .block_on()
-            .context("failed to write imported commit")?;
+        let commit = if let Some(revision) = current_import.revision.as_ref() {
+            let import_commit = self.resolve_summary_to_commit(&workspace, &repo, revision)?;
+            let commit = tx
+                .repo_mut()
+                .rewrite_commit(&import_commit)
+                .set_tree(imported_tree)
+                .set_description("dotmerge import from home")
+                .write()
+                .block_on()
+                .context("failed to rewrite imported commit")?;
+            tx.repo_mut()
+                .rebase_descendants()
+                .block_on()
+                .context("failed to rebase descendants after refreshing current-import")?;
+            commit
+        } else {
+            tx.repo_mut()
+                .new_commit(vec![current_commit.id().clone()], imported_tree)
+                .set_description("dotmerge import from home")
+                .write()
+                .block_on()
+                .context("failed to write imported commit")?
+        };
         tx.repo_mut().set_local_bookmark_target(
             "current-import".as_ref(),
             RefTarget::normal(commit.id().clone()),
