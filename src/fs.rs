@@ -343,7 +343,7 @@ fn collect_repo_paths(root: &Path, current: &Path, paths: &mut BTreeSet<PathBuf>
             .file_type()
             .with_context(|| format!("failed to read file type for `{}`", path.display()))?;
 
-        if current == root && entry.file_name() == ".jj" {
+        if current == root && (entry.file_name() == ".jj" || entry.file_name() == ".git") {
             continue;
         }
 
