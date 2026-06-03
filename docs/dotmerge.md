@@ -683,8 +683,6 @@ impl Jj {
 }
 ```
 
-No jj library integration needed for MVP.
-
 ---
 
 ## Deferred features
