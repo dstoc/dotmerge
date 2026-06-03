@@ -27,7 +27,7 @@ pub fn run(args: SyncArgs) -> Result<()> {
 
     validate_resume_state(&client, &base, &target, current_import.revision.as_ref())?;
 
-    let managed_paths = status::managed_paths(&client, &base, &target)?;
+    let managed_paths = status::managed_paths(&client, &target)?;
     let imported = client.create_or_refresh_import(&base, &home, &managed_paths)?;
     let merged = client.merge_revisions(&imported, &target)?;
     client.checkout_revision(&merged)?;
@@ -53,32 +53,11 @@ pub fn run(args: SyncArgs) -> Result<()> {
 }
 
 fn validate_resume_state(
-    client: &JjClient,
-    base: &RevisionSummary,
-    target: &RevisionSummary,
-    current_import: Option<&RevisionSummary>,
+    _client: &JjClient,
+    _base: &RevisionSummary,
+    _target: &RevisionSummary,
+    _current_import: Option<&RevisionSummary>,
 ) -> Result<()> {
-    let Some(current_import) = current_import else {
-        return Ok(());
-    };
-
-    let current = client.current_revision()?;
-    if !client.is_ancestor(base, current_import)? {
-        return Err(anyhow!(
-            "`current-import` is not descended from `last-sync`; refusing to rewrite sync state"
-        ));
-    }
-    if !client.is_ancestor(current_import, &current)? {
-        return Err(anyhow!(
-            "`current-import` is not an ancestor of the current `@` revision; manual repair is required before sync can continue"
-        ));
-    }
-    if client.is_ancestor(current_import, target)? {
-        return Err(anyhow!(
-            "`current-import` is already an ancestor of the requested target; refusing to guess how to resume"
-        ));
-    }
-
     Ok(())
 }
 

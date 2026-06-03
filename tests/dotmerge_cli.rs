@@ -222,6 +222,130 @@ fn sync_reuses_import_without_merge_when_target_is_ancestor() {
     );
 }
 
+#[test]
+fn sync_stops_managing_target_file_deleted_in_at() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    write_file(&sandbox.home().join("foo"), "hello\n");
+
+    let mut add = Command::cargo_bin("dotmerge").unwrap();
+    add.env("HOME", sandbox.home())
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("foo");
+    add.assert().success();
+
+    sandbox.run_jj(&["desc", "-m", "add foo"]);
+    sandbox.run_jj(&["bookmark", "create", "origin/main"]);
+
+    fs::remove_file(sandbox.repo().join("foo")).unwrap();
+    sandbox.run_jj(&["describe", "-m", "remove foo"]);
+
+    let mut sync = Command::cargo_bin("dotmerge").unwrap();
+    sync.env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    sync.assert().success();
+
+    let last_sync_files = sandbox.jj_stdout(&["file", "list", "-r", "last-sync"]);
+    assert!(
+        !last_sync_files.split_whitespace().any(|path| path == "foo"),
+        "expected `foo` to stay deleted in `last-sync`, got file paths:\n{last_sync_files}"
+    );
+
+    assert!(
+        sandbox.home().join("foo").exists(),
+        "expected sync to leave unmanaged `$HOME/foo` untouched"
+    );
+}
+
+#[test]
+fn sync_rerun_moves_current_import_after_repo_side_state_before_refresh() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    sandbox.run_jj(&["bookmark", "create", "origin/main"]);
+
+    let mut initial_sync = Command::cargo_bin("dotmerge").unwrap();
+    initial_sync
+        .env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--no-export")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    initial_sync.assert().success();
+
+    sandbox.run_jj(&["new", "@"]);
+    write_file(&sandbox.home().join("foo"), "hello\n");
+
+    let mut add = Command::cargo_bin("dotmerge").unwrap();
+    add.env("HOME", sandbox.home())
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("foo");
+    add.assert().success();
+    sandbox.run_jj(&["desc", "-m", "adds foo"]);
+
+    let repo_side_before_rerun = sandbox
+        .jj_stdout(&["log", "-r", "@", "--no-graph", "-T", "commit_id"])
+        .trim()
+        .to_owned();
+    assert!(
+        !repo_side_before_rerun.is_empty(),
+        "expected a repo-side commit before rerunning sync"
+    );
+
+    let mut rerun_sync = Command::cargo_bin("dotmerge").unwrap();
+    rerun_sync
+        .env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--no-export")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    rerun_sync.assert().success();
+
+    let current_import = sandbox
+        .jj_stdout(&[
+            "log",
+            "-r",
+            "current-import",
+            "--no-graph",
+            "-T",
+            "commit_id",
+        ])
+        .trim()
+        .to_owned();
+    assert!(
+        !current_import.is_empty(),
+        "expected `current-import` to exist after `sync --no-export`"
+    );
+
+    let ancestry = sandbox.jj_stdout(&[
+        "log",
+        "-r",
+        &format!("{repo_side_before_rerun}::current-import"),
+        "--no-graph",
+        "-T",
+        "commit_id ++ \"\\n\"",
+    ]);
+    assert!(
+        ancestry
+            .lines()
+            .any(|line| line.trim() == repo_side_before_rerun),
+        "expected rerun sync to recreate `current-import` after the repo-side state; ancestry was:\n{ancestry}"
+    );
+}
+
 struct TestSandbox {
     tempdir: TempDir,
     home: PathBuf,

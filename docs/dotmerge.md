@@ -141,18 +141,22 @@ If they are, behavior is undefined.
 
 Instead, managed paths are derived from jj trees.
 
-For normal sync, a path is managed if it appears in:
+For normal sync, first normalize `current-import` so it is a direct child of the current clean repo-side state.
 
-- the base revision
+Then a path is managed if it appears in:
+
+- the parent of `current-import` after that normalization
 - the target revision
-- the current clean `@` revision in the repo working copy
+
+If the requested target revision is already an ancestor of that repo-side parent, managed paths may be derived from the repo-side parent alone.
 
 This means:
 
 - existing tracked dotfiles come from the jj history itself
-- deletions remain visible as long as they are present in base or target
-- clean repo-side additions already present in `@` are admitted into sync
+- deletions remain visible because managed paths are still compared against `last-sync`
+- clean repo-side additions already present in the repo-side parent are admitted into sync
 - random files elsewhere in `$HOME` are ignored
+- removing a path from the repo-side parent can mean "stop managing this path", not "delete it from `$HOME`"
 
 Unmanaged files in `$HOME` should be ignored completely by `status`, `sync --no-export`, and `sync`.
 
@@ -195,7 +199,7 @@ If there are no home changes, import is a no-op.
 
 If `last-sync` does not exist yet, import should compare `$HOME` against the empty tree and materialize a home snapshot revision.
 
-If `current-import` already exists from a previous interrupted sync, rerunning `dotmerge sync` should refresh that imported revision from the current managed `$HOME` state rather than starting from scratch.
+If `current-import` already exists from a previous interrupted sync, rerunning `dotmerge sync` should first normalize it so that `current-import` is a direct child of the current repo-side state, then refresh that imported revision from the current managed `$HOME` state.
 
 `current-import` represents imported home state, not a fixed target choice, so it may be reused even if the user reruns `dotmerge sync` with a different `--target`.
 
@@ -207,7 +211,13 @@ In practice, that means:
 
 - paths already present in the target revision are in scope automatically
 - additional local-only paths come into scope once they are part of the current clean `@` revision, commonly via `dotmerge add PATH`
-- if a managed path is missing from `$HOME`, treat that as a home-side deletion candidate
+- if a managed path from `target` or `@` is missing from `$HOME`, treat that as a home-side deletion candidate
+- if `target <= @`, a path removed from `@` drops out of managed scope and should be left alone in `$HOME`
+
+More precisely, import should treat the current repo-side state as the parent of `current-import` after normalization. Managed paths come from:
+
+- the parent of `current-import`
+- plus the target revision when the target is not already an ancestor of that repo-side parent
 
 Important constraint:
 
@@ -376,16 +386,9 @@ If deletion candidates are present, status should mention that explicitly.
 
 If `last-sync` does not exist yet, status should say that this is an initial sync from the empty tree.
 
-If `current-import` exists, status should report whether resume preconditions hold:
+If `current-import` exists, status should report that sync will normalize it to a direct child of the current repo-side `@` revision before refreshing it from `$HOME`.
 
-- the repo working copy is clean
-- `last-sync` is an ancestor of `current-import`, or the empty-tree init case applies
-- `current-import` is an ancestor of `@`, or equal to `@`
-- `current-import` is not an ancestor of the requested target revision
-
-Here, "repo working copy is clean" means there are no filesystem modifications relative to `@`, and if `current-import` exists it must still be an ancestor of `@` so the sync lineage remains resumable.
-
-If any resumability check fails, status should report which check failed.
+Here, "repo working copy is clean" means there are no filesystem modifications relative to `@`.
 
 ### `dotmerge sync --no-export --target REV --repo PATH`
 
@@ -426,16 +429,21 @@ Suggested behavior:
 2. Resolve the sync base:
    - `last-sync`, if it exists
    - otherwise the empty tree
-3. Create or refresh `current-import` from the current managed home state on top of that base.
-   - if `current-import` already exists, replace that imported revision in place with the refreshed home snapshot
-   - otherwise, create a new import commit as a child of the current clean `@` revision
-4. Merge `current-import` with the target revision.
+3. Normalize `current-import` so it is a direct child of the current clean repo-side `@` revision.
+   - if the existing bookmark is already there, it may be rewritten in place
+   - otherwise, replace it with a fresh import commit at that position
+4. Compute managed paths from the parent of `current-import`.
+   - if the requested target is already an ancestor of that repo-side parent, use only the parent tree's paths
+   - otherwise, use the union of that parent tree's paths and the target tree's paths
+5. Refresh `current-import` from the current managed home state on top of `last-sync`.
+   - `current-import` should remain an imported home snapshot, not absorb repo-side commits that were already above an older import
+6. Merge `current-import` with the target revision.
    - if the target revision is already an ancestor of the prepared imported state, reuse that prepared state directly instead of creating a merge commit
-5. If merge conflicts exist, stop and report them, leaving `current-import` in place.
-6. If the user later resolves those conflicts in jj and reruns `dotmerge sync`, `dotmerge` should refresh `current-import` again from the latest managed home state and recompute the merge.
-7. If the merge result is clean, export it to `$HOME`.
-8. Only after successful export, move `last-sync` to the exported revision.
-9. Clear `current-import`.
+7. If merge conflicts exist, stop and report them, leaving `current-import` in place.
+8. If the user later resolves those conflicts in jj and reruns `dotmerge sync`, `dotmerge` should normalize and refresh `current-import` again from the latest managed home state and recompute the merge.
+9. If the merge result is clean, export it to `$HOME`.
+10. Only after successful export, move `last-sync` to the exported revision.
+11. Clear `current-import`.
 
 After a successful sync, leave the repo working copy at the final merged/exported revision.
 

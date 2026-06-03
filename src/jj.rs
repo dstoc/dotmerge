@@ -286,11 +286,23 @@ impl JjClient {
         let imported_tree =
             jj_lib::merged_tree::MergedTree::resolved(repo.store().clone(), imported_tree_id);
         let mut tx = repo.start_transaction();
-        let commit = if let Some(revision) = current_import.revision.as_ref() {
-            let import_commit = self.resolve_summary_to_commit(&workspace, &repo, revision)?;
+        let reusable_import = match current_import.revision.as_ref() {
+            Some(revision) => {
+                let import_commit = self.resolve_summary_to_commit(&workspace, &repo, revision)?;
+                if self.is_direct_child_of(&import_commit, &current_commit) {
+                    Some(import_commit)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+
+        let commit = if let Some(import_commit) = reusable_import {
             let commit = tx
                 .repo_mut()
                 .rewrite_commit(&import_commit)
+                .set_parents(vec![current_commit.id().clone()])
                 .set_tree(imported_tree)
                 .set_description("dotmerge import from home")
                 .write()
@@ -381,6 +393,10 @@ impl JjClient {
         repo.index()
             .is_ancestor(ancestor_commit.id(), descendant_commit.id())
             .context("failed to query jj ancestry")
+    }
+
+    fn is_direct_child_of(&self, child: &Commit, parent: &Commit) -> bool {
+        child.parent_ids() == [parent.id().clone()]
     }
 
     pub fn checkout_revision(&self, rev: &RevisionSummary) -> Result<()> {

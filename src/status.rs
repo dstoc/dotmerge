@@ -36,7 +36,7 @@ pub fn collect(
         target.clone(),
         client.repo_path().to_path_buf(),
     );
-    let managed_paths = managed_paths(client, &base, &target)?;
+    let managed_paths = managed_paths(client, &target)?;
     let base_entries = client.read_entries_at_rev(&base, &managed_paths)?;
     let target_entries = client.read_entries_at_rev(&target, &managed_paths)?;
 
@@ -78,19 +78,8 @@ pub fn collect(
     summary.home_differs_from_base = !summary.home_changes.is_empty();
     summary.target_differs_from_base = !summary.target_changes.is_empty();
 
-    let mut resume_issues = Vec::new();
     if let Some(import_revision) = current_import.revision.as_ref() {
-        let base_ok = client.is_ancestor(&base, import_revision)?;
-        if !base_ok {
-            resume_issues.push("`last-sync` is not an ancestor of `current-import`.".to_string());
-        }
-
-        let import_at_current = client.is_ancestor(import_revision, &current)?;
-        if !import_at_current {
-            resume_issues.push(
-                "`current-import` is not an ancestor of the current `@` revision.".to_string(),
-            );
-        } else if current.same_revision(import_revision) {
+        if current.same_revision(import_revision) {
             summary.notes.push(
                 "`current-import` already matches `@` and will be refreshed on sync.".to_string(),
             );
@@ -98,20 +87,7 @@ pub fn collect(
             summary.prepared = Some(current.clone());
             summary
                 .notes
-                .push("repo-side prepared state already exists at `@`.".to_string());
-        }
-
-        let import_is_target_ancestor = client.is_ancestor(import_revision, &target)?;
-        if import_is_target_ancestor {
-            resume_issues.push(
-                "`current-import` is already an ancestor of the requested target.".to_string(),
-            );
-        }
-
-        if resume_issues.is_empty() && summary.repo_clean == Some(true) {
-            summary
-                .notes
-                .push("existing sync state looks resumable.".to_string());
+                .push("sync will replace `current-import` with a direct child of the current repo-side `@` state before refreshing it.".to_string());
         }
     }
 
@@ -131,13 +107,10 @@ pub fn collect(
             .notes
             .push("deletion candidates are present; MVP sync will only report them, not remove files from `$HOME`.".to_string());
     }
-    summary.notes.extend(resume_issues.iter().cloned());
-
-    if summary.repo_clean != Some(true) || !resume_issues.is_empty() {
-        summary.next_actions.push(
-            "repair the repo state until the working copy is clean and the resume checks pass"
-                .to_string(),
-        );
+    if summary.repo_clean != Some(true) {
+        summary
+            .next_actions
+            .push("repair the repo state until the working copy is clean".to_string());
     } else if summary.has_conflicts {
         summary
             .next_actions
@@ -239,13 +212,18 @@ pub fn print_summary(summary: &SyncStatusSummary) {
 
 pub(crate) fn managed_paths(
     client: &JjClient,
-    base: &RevisionSummary,
     target: &RevisionSummary,
 ) -> Result<BTreeSet<PathBuf>> {
+    let current = client.current_revision()?;
+    if client.is_ancestor(target, &current)? {
+        return client
+            .list_files(&current)
+            .map(|files| files.into_iter().collect());
+    }
+
     let mut paths = BTreeSet::new();
-    paths.extend(client.list_files(base)?);
     paths.extend(client.list_files(target)?);
-    paths.extend(fs::list_repo_paths(client.repo_path())?);
+    paths.extend(client.list_files(&current)?);
     Ok(paths)
 }
 
