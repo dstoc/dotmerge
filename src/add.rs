@@ -1,8 +1,8 @@
 use crate::cli::AddArgs;
+use crate::config;
 use crate::fs;
 use crate::jj::JjClient;
 use crate::model::ValidatedAddSource;
-use crate::util;
 use anyhow::{anyhow, Result};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -12,9 +12,16 @@ struct PlannedAdd {
     destination_path: PathBuf,
 }
 
-pub fn run(args: AddArgs) -> Result<()> {
-    let home = util::home_dir()?;
-    let client = JjClient::open(&args.repo)?;
+pub fn run(config_flag: Option<&std::path::Path>, args: AddArgs) -> Result<()> {
+    let resolved = config::resolve(
+        config_flag,
+        args.home.as_deref(),
+        args.repo.as_deref(),
+        None,
+        false,
+    )?;
+    let home = resolved.home;
+    let client = JjClient::open(&resolved.repo)?;
 
     let mut seen_repo_paths = HashSet::new();
     let mut planned = Vec::with_capacity(args.paths.len());

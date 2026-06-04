@@ -1,4 +1,5 @@
 use crate::cli::SyncArgs;
+use crate::config;
 use crate::export;
 use crate::import;
 use crate::jj::{JjClient, JjSession};
@@ -8,12 +9,20 @@ use crate::status;
 use crate::util;
 use anyhow::{anyhow, Result};
 
-pub fn run(args: SyncArgs) -> Result<()> {
-    let home = util::home_dir()?;
-    let client = JjClient::open(&args.common.repo)?;
+pub fn run(config_flag: Option<&std::path::Path>, args: SyncArgs) -> Result<()> {
+    let resolved = config::resolve(
+        config_flag,
+        args.common.home.as_deref(),
+        args.common.repo.as_deref(),
+        args.common.target.as_deref(),
+        true,
+    )?;
+    let home = resolved.home;
+    let client = JjClient::open(&resolved.repo)?;
     let repo_path = client.repo_path().to_path_buf();
     let mut session = client.begin()?;
-    let target = session.resolve_rev(&args.common.target)?;
+    let target_str = resolved.target.expect("need_target=true guarantees Some");
+    let target = session.resolve_rev(&target_str)?;
 
     if !status::is_working_copy_clean(&session, &repo_path)? {
         return Err(anyhow!(

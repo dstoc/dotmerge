@@ -8,6 +8,10 @@ use std::path::PathBuf;
     about = "Conservative jj-backed dotfile sync"
 )]
 pub struct Cli {
+    /// Path to the config file (overrides DOTMERGE_CONFIG and the default path).
+    #[arg(long, global = true)]
+    pub config: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -24,13 +28,17 @@ pub enum Command {
 
 #[derive(Debug, Args, Clone)]
 pub struct RepoTargetArgs {
+    /// Home directory to sync against (overrides config and $HOME).
+    #[arg(long)]
+    pub home: Option<PathBuf>,
+
     /// Path to the jj repo.
     #[arg(long)]
-    pub repo: PathBuf,
+    pub repo: Option<PathBuf>,
 
     /// Revision expression to synchronize against.
     #[arg(long)]
-    pub target: String,
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -51,9 +59,13 @@ pub struct SyncArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct AddArgs {
+    /// Home directory to sync against (overrides config and $HOME).
+    #[arg(long)]
+    pub home: Option<PathBuf>,
+
     /// Path to the jj repo.
     #[arg(long)]
-    pub repo: PathBuf,
+    pub repo: Option<PathBuf>,
 
     /// One or more absolute or home-relative paths to admit into sync.
     #[arg(value_name = "PATH", required = true)]

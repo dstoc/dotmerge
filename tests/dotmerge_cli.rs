@@ -8,7 +8,7 @@ use tempfile::TempDir;
 #[test]
 fn add_accepts_home_relative_file_and_copies_into_repo_worktree() {
     let sandbox = TestSandbox::new();
-    let source = sandbox.home().join(".config/dotmerge/config.toml");
+    let source = sandbox.home().join(".config/sway/config");
     write_file(&source, "theme = \"local\"\n");
 
     sandbox.init_repo();
@@ -18,12 +18,12 @@ fn add_accepts_home_relative_file_and_copies_into_repo_worktree() {
         .arg("add")
         .arg("--repo")
         .arg(sandbox.repo())
-        .arg(".config/dotmerge/config.toml");
+        .arg(".config/sway/config");
 
     cmd.assert().success();
 
     assert_eq!(
-        fs::read_to_string(sandbox.repo().join(".config/dotmerge/config.toml")).unwrap(),
+        fs::read_to_string(sandbox.repo().join(".config/sway/config")).unwrap(),
         "theme = \"local\"\n"
     );
 }

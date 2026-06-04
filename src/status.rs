@@ -1,11 +1,11 @@
 use crate::cli::StatusArgs;
+use crate::config;
 use crate::fs;
 use crate::jj::{JjClient, JjSession};
 use crate::model::{
     FileChangeKind, FileStatusSummary, ManagedEntry, ResumeState, Revision, SyncState,
     SyncStatusSummary,
 };
-use crate::util;
 use anyhow::Result;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -30,13 +30,20 @@ pub(crate) trait StatusSource {
     fn working_copy_clean_hint(&self) -> Result<Option<bool>>;
 }
 
-pub fn run(args: StatusArgs) -> Result<()> {
-    let home = util::home_dir()?;
-    let client = JjClient::open(&args.common.repo)?;
+pub fn run(config_flag: Option<&std::path::Path>, args: StatusArgs) -> Result<()> {
+    let resolved = config::resolve(
+        config_flag,
+        args.common.home.as_deref(),
+        args.common.repo.as_deref(),
+        args.common.target.as_deref(),
+        true,
+    )?;
+    let client = JjClient::open(&resolved.repo)?;
     let repo_path = client.repo_path().to_path_buf();
     let session = client.begin()?;
-    let target = session.resolve_rev(&args.common.target)?;
-    let summary = collect(&session, &repo_path, &home, target)?;
+    let target_str = resolved.target.expect("need_target=true guarantees Some");
+    let target = session.resolve_rev(&target_str)?;
+    let summary = collect(&session, &repo_path, &resolved.home, target)?;
     print_summary(&summary);
     Ok(())
 }

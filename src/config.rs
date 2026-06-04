@@ -1,7 +1,3 @@
-// This module is wired into the rest of the binary in Steps 2-3; suppress
-// "unused" lints that fire because the items are not yet called from main.
-#![allow(dead_code)]
-
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -75,6 +71,10 @@ pub(crate) fn load(config_flag: Option<&Path>) -> Result<FileConfig> {
         };
     }
 
+    // A file that exists at any of the three locations is parsed strictly:
+    // parse errors (including unknown keys via `deny_unknown_fields`) always
+    // surface. The default path is dotmerge-specific, so a malformed file there
+    // is a real user error worth reporting, not something to silently ignore.
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read config file `{}`", path.display()))?;
 
@@ -99,6 +99,90 @@ pub(crate) fn expand_path(raw: &str) -> Result<PathBuf> {
     Err(anyhow!(
         "paths must be absolute or start with `~/`, got `{raw}`"
     ))
+}
+
+/// The fully-resolved runtime coordinates for a single `dotmerge` invocation.
+#[derive(Debug)]
+pub(crate) struct ResolvedConfig {
+    pub(crate) home: PathBuf,
+    pub(crate) repo: PathBuf,
+    /// `None` only when `need_target` was `false` (i.e. the `add` subcommand).
+    pub(crate) target: Option<String>,
+}
+
+/// Resolve the three runtime coordinates (`home`, `repo`, `target`) for a
+/// `dotmerge` invocation by applying the value ladder:
+///
+/// ```text
+/// --flag  >  config value  >  fallback
+/// ```
+///
+/// * `home` fallback: the real `$HOME` via [`crate::util::home_dir`].
+/// * `repo` fallback: none — errors with `--repo is required (no repo in config)`.
+/// * `target` fallback: none when `need_target` is `true` — errors with
+///   `--target is required (no target in config)`.  When `need_target` is
+///   `false` (the `add` subcommand), `target` is always `None`.
+pub(crate) fn resolve(
+    config_flag: Option<&Path>,
+    home_flag: Option<&Path>,
+    repo_flag: Option<&Path>,
+    target_flag: Option<&str>,
+    need_target: bool,
+) -> Result<ResolvedConfig> {
+    let file = load(config_flag)?;
+
+    // --- home ---
+    let home = if let Some(flag) = home_flag {
+        let raw = flag
+            .to_str()
+            .ok_or_else(|| anyhow!("--home path is not valid UTF-8"))?;
+        canonicalize_config_path(expand_path(raw)?, "--home")?
+    } else if let Some(raw) = file.home {
+        canonicalize_config_path(expand_path(&raw)?, "config `home`")?
+    } else {
+        crate::util::home_dir()?
+    };
+
+    // --- repo ---
+    let repo = if let Some(flag) = repo_flag {
+        let raw = flag
+            .to_str()
+            .ok_or_else(|| anyhow!("--repo path is not valid UTF-8"))?;
+        canonicalize_config_path(expand_path(raw)?, "--repo")?
+    } else if let Some(raw) = file.repo {
+        canonicalize_config_path(expand_path(&raw)?, "config `repo`")?
+    } else {
+        return Err(anyhow!("--repo is required (no repo in config)"));
+    };
+
+    // --- target ---
+    // When need_target is false (i.e. `add`), target is always None; the
+    // subcommand does not use it and we never consult the config for it.
+    let target = if !need_target {
+        None
+    } else if let Some(flag) = target_flag {
+        Some(flag.to_string())
+    } else if let Some(val) = file.target {
+        Some(val)
+    } else {
+        return Err(anyhow!("--target is required (no target in config)"));
+    };
+
+    Ok(ResolvedConfig { home, repo, target })
+}
+
+/// Canonicalize an already-expanded path, applying the same checks that
+/// [`crate::util::home_dir`] applies: must be absolute, then
+/// [`std::fs::canonicalize`].
+fn canonicalize_config_path(path: PathBuf, label: &str) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        return Err(anyhow!(
+            "{label} must be an absolute path, got `{}`",
+            path.display()
+        ));
+    }
+    std::fs::canonicalize(&path)
+        .with_context(|| format!("failed to canonicalize {label} at `{}`", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -327,5 +411,91 @@ target = "origin/main"
             std::env::remove_var("DOTMERGE_CONFIG");
         }
         assert_eq!(cfg.target.as_deref(), Some("flag-target"));
+    }
+
+    // -- resolve ------------------------------------------------------------
+
+    /// target_flag wins over a config-file target.
+    #[test]
+    fn resolve_target_flag_wins_over_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+
+        // Write a config with a target that should be overridden.
+        let cfg_path = tmp.path().join("config.toml");
+        // We also need repo so resolve doesn't fail on the repo ladder.
+        // Use a real directory for repo so canonicalize succeeds.
+        let repo_dir = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::write(
+            &cfg_path,
+            format!(
+                "repo = \"{}\"\ntarget = \"config-target\"\n",
+                repo_dir.display()
+            ),
+        )
+        .unwrap();
+
+        let resolved = resolve(Some(&cfg_path), None, None, Some("flag-target"), true).unwrap();
+        assert_eq!(resolved.target.as_deref(), Some("flag-target"));
+    }
+
+    /// When neither flag nor config provides target and need_target is true, error.
+    #[test]
+    fn resolve_missing_target_errors_when_required() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let repo_dir = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::write(
+            &cfg_path,
+            format!("repo = \"{}\"\n", repo_dir.display()),
+        )
+        .unwrap();
+
+        let err = resolve(Some(&cfg_path), None, None, None, true).unwrap_err();
+        assert!(
+            err.to_string().contains("--target is required"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// When repo is absent from both flag and config, error.
+    #[test]
+    fn resolve_missing_repo_errors() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        // Config with only target — no repo.
+        std::fs::write(&cfg_path, "target = \"origin/main\"\n").unwrap();
+
+        let err = resolve(Some(&cfg_path), None, None, None, false).unwrap_err();
+        assert!(
+            err.to_string().contains("--repo is required"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// need_target=false yields target=None even when config has one.
+    #[test]
+    fn resolve_need_target_false_yields_none() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let repo_dir = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::write(
+            &cfg_path,
+            format!(
+                "repo = \"{}\"\ntarget = \"origin/main\"\n",
+                repo_dir.display()
+            ),
+        )
+        .unwrap();
+
+        // No target_flag, need_target=false → target should be None.
+        let resolved = resolve(Some(&cfg_path), None, None, None, false).unwrap();
+        assert!(resolved.target.is_none());
     }
 }
