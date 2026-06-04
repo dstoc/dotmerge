@@ -42,6 +42,10 @@ dotmerge sync --no-export --target REV --repo PATH
 dotmerge add PATH... --repo PATH
 ```
 
+`--repo`, `--target`, and `--home` may be omitted when a config file supplies
+them (see [Config](#config)); the flags override the config when both are
+present.
+
 No templating, no scripts, no host-specific variants, no automatic background commits, no fancy merge UI.
 
 ---
@@ -62,9 +66,10 @@ last-sync      = the last revision known to match this local home directory
 current-import = the current imported home snapshot being merged
 ```
 
-The target revision is not implicit in the MVP.
+The target revision is not implicit.
 
-The user must pass it explicitly to commands that need it, for example:
+It must be supplied to commands that need it (`status`, `sync`) — either via
+`--target` or the `target` config key, for example:
 
 ```text
 --target origin/main
@@ -78,9 +83,9 @@ Normally the three important states are:
 
 ```text
 base   = jj revision last-sync
-target = jj revision passed by --target
-repo   = filesystem path passed by --repo
-home   = filesystem under $HOME
+target = jj revision from --target or the config `target`
+repo   = filesystem path from --repo or the config `repo`
+home   = filesystem under $HOME (or --home / the config `home`)
 ```
 
 On first sync, substitute the empty tree for `last-sync`.
@@ -508,14 +513,59 @@ A normal flow could be:
 
 ## Config
 
-The MVP should not require a config file.
+A config file supplies optional defaults for the three coordinates, so a
+machine that always syncs one repo against one target need not retype them. No
+config file is required; running with the flags alone still works.
 
-For now, the caller must pass:
+### File
 
-- `--repo PATH`
-- `--target REV` for `status` and `sync`
+TOML, with three optional keys:
 
-Later, a config file can provide defaults for these.
+```toml
+# ~/.config/dotmerge/config.toml — all keys optional
+home   = "~/dotmerge-home"   # overrides $HOME
+repo   = "~/dotmerge-repo"
+target = "origin/main"
+```
+
+Unknown keys are a hard error (a typo such as `tagret =` fails loudly rather
+than being silently ignored).
+
+Path values (`home`, `repo`) must be absolute or begin with `~/`. A leading
+`~/` expands against the **real** process `$HOME` — always the real one, never
+the `home` override, so `home = "~/dotmerge-home"` is well-defined and tilde
+expansion means the same thing everywhere. Any other relative path is an error.
+
+### Resolving values
+
+Each of `home`, `repo`, `target` is resolved independently:
+
+```text
+--flag  >  config value  >  fallback
+```
+
+- `home` falls back to the real `$HOME`.
+- `repo` has no fallback: missing everywhere is an error.
+- `target` has no fallback for `status`/`sync`: missing everywhere is an error.
+  `add` does not use `target`.
+
+### Locating the config file
+
+The config *location* is resolved separately from its *values*:
+
+```text
+--config FLAG  >  DOTMERGE_CONFIG env  >  default path
+```
+
+The default path is `$XDG_CONFIG_HOME/dotmerge/config.toml`, falling back to
+`$HOME/.config/dotmerge/config.toml` when `$XDG_CONFIG_HOME` is unset or empty.
+The default path is always derived from the real process `$HOME`/
+`$XDG_CONFIG_HOME`, never from the `home` override (which would be circular).
+
+A `--config` or `DOTMERGE_CONFIG` path that does not exist is an error — the
+caller named a file that is not there. A missing *default* path is not an
+error; it is treated as an empty config, so the no-config case stays
+frictionless.
 
 ---
 
