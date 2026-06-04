@@ -3,6 +3,9 @@
 mod add;
 mod cli;
 mod fs;
+mod export;
+mod import;
+mod merge;
 mod jj;
 mod model;
 mod status;

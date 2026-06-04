@@ -1,9 +1,8 @@
-use crate::fs;
+use crate::import;
 use crate::model::{BookmarkSummary, ManagedEntry, ResumeState, RevisionSummary};
-use crate::util;
 use anyhow::{anyhow, Context, Result};
 use chrono::Local;
-use jj_lib::backend::{CommitId, CopyId, TreeValue};
+use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
 use jj_lib::config::StackedConfig;
 use jj_lib::conflicts::{
@@ -15,7 +14,7 @@ use jj_lib::fileset::FilesetAliasesMap;
 use jj_lib::merge::SameChange;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::RefTarget;
-use jj_lib::repo::{ReadonlyRepo, Repo as _, StoreFactories};
+use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _, StoreFactories};
 use jj_lib::repo_path::{RepoPath, RepoPathBuf, RepoPathUiConverter};
 use jj_lib::revset::{
     parse, RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions, RevsetParseContext,
@@ -25,7 +24,6 @@ use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::settings::UserSettings;
 use jj_lib::time_util::DatePatternContext;
 use jj_lib::transaction::Transaction;
-use jj_lib::tree_builder::TreeBuilder;
 use jj_lib::tree_merge::MergeOptions;
 use jj_lib::workspace::{default_working_copy_factories, Workspace};
 use pollster::FutureExt as _;
@@ -149,7 +147,7 @@ impl JjClient {
         let current = self.current_revision()?;
         let current_commit = self.resolve_summary_to_commit(&workspace, &repo, &current)?;
         let current_is_disposable =
-            self.is_disposable_sync_placeholder(repo.as_ref(), &current_commit)?;
+            import::is_disposable_sync_placeholder(repo.as_ref(), &current_commit)?;
 
         match current_import {
             None => Ok(ResumeState::Fresh),
@@ -204,16 +202,6 @@ impl JjClient {
         repo.index()
             .is_ancestor(ancestor_commit.id(), descendant_commit.id())
             .context("failed to query jj ancestry")
-    }
-
-    fn is_disposable_sync_placeholder(&self, repo: &ReadonlyRepo, commit: &Commit) -> Result<bool> {
-        if commit.parent_ids().len() != 1 || !commit.description().is_empty() {
-            return Ok(false);
-        }
-        commit
-            .is_empty(repo)
-            .block_on()
-            .context("failed to determine whether current `@` is empty")
     }
 
     fn load_workspace_and_repo(&self) -> Result<(Workspace, Arc<ReadonlyRepo>)> {
@@ -385,7 +373,6 @@ impl JjClient {
     ) -> RevisionSummary {
         RevisionSummary::resolved(expression, commit_id.hex())
     }
-
 }
 
 fn resume_state_for_commits(
@@ -430,14 +417,16 @@ fn resume_state_for_commits(
         return ResumeState::Resumable;
     }
 
-    if import_commit.parent_ids().len() == 1 && import_commit.parent_ids()[0] == *current_commit.id()
+    if import_commit.parent_ids().len() == 1
+        && import_commit.parent_ids()[0] == *current_commit.id()
     {
         return ResumeState::Resumable;
     }
 
     if current_is_disposable {
         if let Some(current_parent) = current_commit.parent_ids().first() {
-            if import_commit.parent_ids().len() == 1 && import_commit.parent_ids()[0] == *current_parent
+            if import_commit.parent_ids().len() == 1
+                && import_commit.parent_ids()[0] == *current_parent
             {
                 return ResumeState::Resumable;
             }
@@ -453,7 +442,11 @@ fn resume_state_for_commits(
 }
 
 impl JjSession {
-    fn repo(&self) -> &dyn jj_lib::repo::Repo {
+    pub(crate) fn repo_mut(&mut self) -> &mut MutableRepo {
+        self.tx.repo_mut()
+    }
+
+    pub(crate) fn repo(&self) -> &dyn jj_lib::repo::Repo {
         self.tx.repo()
     }
 
@@ -514,6 +507,10 @@ impl JjSession {
         Ok(())
     }
 
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     pub(crate) fn resume_state(
         &self,
         base: &RevisionSummary,
@@ -521,7 +518,8 @@ impl JjSession {
     ) -> Result<ResumeState> {
         let current = self.current_revision()?;
         let current_commit = self.resolve_summary_to_commit(&current)?;
-        let current_is_disposable = self.is_disposable_sync_placeholder(self.repo(), &current_commit)?;
+        let current_is_disposable =
+            import::is_disposable_sync_placeholder(self.repo(), &current_commit)?;
 
         match current_import {
             None => Ok(ResumeState::Fresh),
@@ -542,186 +540,6 @@ impl JjSession {
                 ))
             }
         }
-    }
-
-    pub(crate) fn create_or_refresh_import(
-        &mut self,
-        base: &RevisionSummary,
-        home_state: &Path,
-        managed_paths: &BTreeSet<PathBuf>,
-    ) -> Result<RevisionSummary> {
-        let (current_commit, current_import, current_tree_id, imported_tree_id) = {
-            let repo = self.repo();
-            let base_commit = self.resolve_summary_to_commit(base)?;
-            let current_commit = self.resolve_commit_by_revset("@")?;
-            let current_import = self.bookmark_summary("current-import")?;
-            let base_tree_id = base_commit
-                .tree_ids()
-                .as_resolved()
-                .cloned()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "base revision `{}` must have a resolved tree",
-                        self.rev_label(base)
-                    )
-                })?;
-
-            let mut builder = TreeBuilder::new(repo.store().clone(), base_tree_id);
-            for path in managed_paths {
-                let repo_path = self.parse_repo_path(path)?;
-                match fs::read_rooted_entry(home_state, path)? {
-                    Some(ManagedEntry::File {
-                        contents,
-                        executable,
-                    }) => {
-                        let file_id = repo
-                            .store()
-                            .write_file(repo_path.as_ref(), &mut contents.as_slice())
-                            .block_on()
-                            .with_context(|| {
-                                format!(
-                                    "failed to write imported file `{}` to the jj store",
-                                    path.display()
-                                )
-                            })?;
-                        builder.set(
-                            repo_path,
-                            TreeValue::File {
-                                id: file_id,
-                                executable,
-                                copy_id: CopyId::placeholder(),
-                            },
-                        );
-                    }
-                    Some(ManagedEntry::Symlink { target }) => {
-                        let target = target.to_str().ok_or_else(|| {
-                            anyhow!("symlink target for `{}` is not valid UTF-8", path.display())
-                        })?;
-                        let symlink_id = repo
-                            .store()
-                            .write_symlink(repo_path.as_ref(), target)
-                            .block_on()
-                            .with_context(|| {
-                                format!(
-                                    "failed to write imported symlink `{}` to the jj store",
-                                    path.display()
-                                )
-                            })?;
-                        builder.set(repo_path, TreeValue::Symlink(symlink_id));
-                    }
-                    Some(ManagedEntry::Conflict) => {
-                        return Err(anyhow!(
-                            "cannot import unresolved conflict from `$HOME` at `{}`",
-                            path.display()
-                        ));
-                    }
-                    Some(ManagedEntry::Unsupported { kind }) => {
-                        return Err(anyhow!(
-                            "cannot import `{}` from `$HOME` because it is a {kind}",
-                            path.display()
-                        ));
-                    }
-                    None => builder.remove(repo_path),
-                }
-            }
-
-            let imported_tree_id = builder
-                .write_tree()
-                .block_on()
-                .context("failed to materialize imported tree")?;
-
-            let current_tree_id = current_commit
-                .tree_ids()
-                .as_resolved()
-                .cloned()
-                .ok_or_else(|| anyhow!("current `@` revision must have a resolved tree"))?;
-
-            (current_commit, current_import, current_tree_id, imported_tree_id)
-        };
-
-        if imported_tree_id == current_tree_id {
-            if current_import.exists {
-                self.tx
-                    .repo_mut()
-                    .set_local_bookmark_target("current-import".as_ref(), RefTarget::absent());
-                self.dirty = true;
-            }
-            return Ok(self.revision_summary("@", current_commit.id()));
-        }
-
-        let imported_tree =
-            jj_lib::merged_tree::MergedTree::resolved(self.repo().store().clone(), imported_tree_id);
-        let current_is_disposable =
-            self.is_disposable_sync_placeholder(self.repo(), &current_commit)?;
-        let reusable_import = match current_import.revision.as_ref() {
-            Some(revision) => {
-                let import_commit = self.resolve_summary_to_commit(revision)?;
-                if self.is_direct_child_of(&import_commit, &current_commit) {
-                    Some(import_commit)
-                } else {
-                    None
-                }
-            }
-            None => None,
-        };
-
-        let import_description = self.import_description();
-        let commit = if let Some(import_commit) = reusable_import {
-            let commit = self
-                .tx
-                .repo_mut()
-                .rewrite_commit(&import_commit)
-                .set_parents(vec![current_commit.id().clone()])
-                .set_tree(imported_tree)
-                .set_description(import_description.clone())
-                .write()
-                .block_on()
-                .context("failed to rewrite imported commit")?;
-            self.tx
-                .repo_mut()
-                .rebase_descendants()
-                .block_on()
-                .context("failed to rebase descendants after refreshing current-import")?;
-            commit
-        } else if current_is_disposable {
-            self.tx
-                .repo_mut()
-                .new_commit(current_commit.parent_ids().to_vec(), imported_tree)
-                .set_description(import_description.clone())
-                .write()
-                .block_on()
-                .context("failed to create imported commit on top of disposable `@` parent")?
-        } else {
-            self.tx
-                .repo_mut()
-                .new_commit(vec![current_commit.id().clone()], imported_tree)
-                .set_description(import_description)
-                .write()
-                .block_on()
-                .context("failed to write imported commit")?
-        };
-        self.tx.repo_mut().set_local_bookmark_target(
-            "current-import".as_ref(),
-            RefTarget::normal(commit.id().clone()),
-        );
-        self.dirty = true;
-        Ok(self.revision_summary("current-import", commit.id()))
-    }
-
-    pub(crate) fn merge_revisions(
-        &mut self,
-        left: &RevisionSummary,
-        right: &RevisionSummary,
-    ) -> Result<RevisionSummary> {
-        let (left, right) = self.normalize_disposable_current_in_merge_inputs(left, right)?;
-        if self.is_ancestor(&right, &left)? {
-            return Ok(left);
-        }
-        if self.is_ancestor(&left, &right)? {
-            return Ok(right);
-        }
-        let merge_description = self.merge_description_for_target(&right)?;
-        self.create_new_change(&[left, right], &merge_description)
     }
 
     pub(crate) fn has_conflicts(&self, rev: &RevisionSummary) -> Result<bool> {
@@ -772,7 +590,7 @@ impl JjSession {
         Ok(())
     }
 
-    fn create_new_change(
+    pub(crate) fn create_new_change(
         &mut self,
         parents: &[RevisionSummary],
         message: &str,
@@ -824,86 +642,7 @@ impl JjSession {
         Ok(())
     }
 
-    fn is_direct_child_of(&self, child: &Commit, parent: &Commit) -> bool {
-        child.parent_ids() == [parent.id().clone()]
-    }
-
-    fn import_description(&self) -> String {
-        format!("dotmerge: import changes from {}", util::hostname_label())
-    }
-
-    fn merge_description_for_target(&self, target: &RevisionSummary) -> Result<String> {
-        Ok(format!(
-            "dotmerge: merge {} changes into {}",
-            util::hostname_label(),
-            self.target_label(target)?
-        ))
-    }
-
-    fn target_label(&self, target: &RevisionSummary) -> Result<String> {
-        let commit = self.resolve_summary_to_commit(target)?;
-        let mut names = Vec::new();
-        for (name, _) in self.repo().view().local_bookmarks_for_commit(commit.id()) {
-            names.push(name.as_str().to_string());
-        }
-        names.sort();
-        names.dedup();
-        if names.is_empty() {
-            Ok(commit.id().hex()[..8].to_string())
-        } else {
-            Ok(names.join(", "))
-        }
-    }
-
-    fn is_disposable_sync_placeholder(
-        &self,
-        repo: &dyn jj_lib::repo::Repo,
-        commit: &Commit,
-    ) -> Result<bool> {
-        if commit.parent_ids().len() != 1 || !commit.description().is_empty() {
-            return Ok(false);
-        }
-        commit
-            .is_empty(repo)
-            .block_on()
-            .context("failed to determine whether current `@` is empty")
-    }
-
-    fn normalize_disposable_current_in_merge_inputs(
-        &self,
-        left: &RevisionSummary,
-        right: &RevisionSummary,
-    ) -> Result<(RevisionSummary, RevisionSummary)> {
-        let current = self.current_revision()?;
-        let current_commit = self.resolve_summary_to_commit(&current)?;
-        if !self.is_disposable_sync_placeholder(self.repo(), &current_commit)? {
-            return Ok((left.clone(), right.clone()));
-        }
-        if left.same_revision(&current) && right.same_revision(&current) {
-            return Ok((left.clone(), right.clone()));
-        }
-
-        let parent_id = current_commit
-            .parent_ids()
-            .first()
-            .cloned()
-            .ok_or_else(|| anyhow!("disposable current `@` must have exactly one parent"))?;
-        let parent = self.revision_summary(parent_id.hex(), &parent_id);
-
-        let left = if left.same_revision(&current) {
-            parent.clone()
-        } else {
-            left.clone()
-        };
-        let right = if right.same_revision(&current) {
-            parent
-        } else {
-            right.clone()
-        };
-        Ok((left, right))
-    }
-
-    fn resolve_summary_to_commit(&self, rev: &RevisionSummary) -> Result<Commit> {
+    pub(crate) fn resolve_summary_to_commit(&self, rev: &RevisionSummary) -> Result<Commit> {
         let repo = self.repo();
         if let Some(hex) = &rev.resolved {
             let commit_id = CommitId::try_from_hex(hex)
@@ -935,8 +674,7 @@ impl JjSession {
         if commits.next().transpose()?.is_some() {
             return Err(anyhow!("`{revset}` resolved to more than one revision"));
         }
-        repo
-            .store()
+        repo.store()
             .get_commit(&first.0)
             .with_context(|| format!("failed to load commit for revset `{revset}`"))
     }
@@ -971,7 +709,7 @@ impl JjSession {
             .with_context(|| format!("failed to parse revset `{revset}`"))
     }
 
-    fn parse_repo_path(&self, path: &Path) -> Result<RepoPathBuf> {
+    pub(crate) fn parse_repo_path(&self, path: &Path) -> Result<RepoPathBuf> {
         RepoPathBuf::parse_fs_path(
             self.workspace.workspace_root(),
             self.workspace.workspace_root(),
@@ -1045,10 +783,6 @@ impl JjSession {
         commit_id: &CommitId,
     ) -> RevisionSummary {
         RevisionSummary::resolved(expression, commit_id.hex())
-    }
-
-    fn rev_label<'a>(&self, rev: &'a RevisionSummary) -> &'a str {
-        rev.resolved.as_deref().unwrap_or(&rev.expression)
     }
 }
 

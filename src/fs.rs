@@ -1,12 +1,12 @@
 use crate::model::{AddSourceKind, ManagedEntry, ValidatedAddSource};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::io::Write;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 

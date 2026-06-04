@@ -1,11 +1,12 @@
 use crate::cli::SyncArgs;
-use crate::fs;
+use crate::export;
+use crate::import;
 use crate::jj::JjClient;
+use crate::merge;
 use crate::model::{ResumeState, RevisionSummary};
 use crate::status;
 use crate::util;
-use anyhow::{Result, anyhow};
-use std::path::Path;
+use anyhow::{anyhow, Result};
 
 pub fn run(args: SyncArgs) -> Result<()> {
     let home = util::home_dir()?;
@@ -30,8 +31,8 @@ pub fn run(args: SyncArgs) -> Result<()> {
     validate_resume_state(&session, &base, current_import.revision.as_ref())?;
 
     let managed_paths = status::managed_paths(&session, &target)?;
-    let imported = session.create_or_refresh_import(&base, &home, &managed_paths)?;
-    let merged = session.merge_revisions(&imported, &target)?;
+    let imported = import::create_or_refresh_import(&mut session, &base, &home, &managed_paths)?;
+    let merged = merge::merge_revisions(&mut session, &imported, &target)?;
     let current = session.current_revision()?;
     if !merged.same_revision(&current) {
         session.checkout_revision(&merged)?;
@@ -50,7 +51,7 @@ pub fn run(args: SyncArgs) -> Result<()> {
         return Ok(());
     }
 
-    export_revision_to_home(&session, &home, &merged, &managed_paths)?;
+    export::export_revision_to_home(&session, &home, &merged, &managed_paths)?;
     session.complete_sync(&merged)?;
 
     let summary = status::collect_for_sync(&session, &repo_path, &home, target)?;
@@ -68,21 +69,4 @@ fn validate_resume_state(
         ResumeState::Fresh | ResumeState::Resumable => Ok(()),
         ResumeState::Blocked { reason } => Err(anyhow!(reason)),
     }
-}
-
-fn export_revision_to_home(
-    session: &impl status::StatusSource,
-    home: &Path,
-    revision: &RevisionSummary,
-    managed_paths: &std::collections::BTreeSet<std::path::PathBuf>,
-) -> Result<()> {
-    let entries = session.read_entries_at_rev(revision, managed_paths)?;
-    let mut export_entries = Vec::new();
-    for (path, entry) in entries {
-        if let Some(entry) = entry {
-            export_entries.push((path, entry));
-        }
-    }
-    fs::export_home_entries(home, &export_entries)?;
-    Ok(())
 }

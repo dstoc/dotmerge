@@ -130,11 +130,14 @@ fn collect_with_repo_clean(
     summary.target_differs_from_base =
         !target_already_applied && !summary.target_changes.is_empty();
 
-    if let Some(note) = current_import_note(&resume_state, &current, current_import.revision.as_ref()) {
+    if let Some(note) =
+        current_import_note(&resume_state, &current, current_import.revision.as_ref())
+    {
         summary.notes.push(note);
     }
     if let Some(import_revision) = current_import.revision.as_ref() {
-        if matches!(resume_state, ResumeState::Resumable) && !current.same_revision(import_revision) {
+        if matches!(resume_state, ResumeState::Resumable) && !current.same_revision(import_revision)
+        {
             summary.prepared = Some(current.clone());
         }
     }
@@ -301,10 +304,7 @@ pub(crate) fn managed_paths(
     Ok(paths)
 }
 
-pub(crate) fn is_working_copy_clean(
-    source: &impl StatusSource,
-    repo_path: &Path,
-) -> Result<bool> {
+pub(crate) fn is_working_copy_clean(source: &impl StatusSource, repo_path: &Path) -> Result<bool> {
     let current = source.current_revision()?;
     let tracked_paths = source.list_files(&current)?;
     let repo_paths = fs::list_repo_paths(repo_path)?;
