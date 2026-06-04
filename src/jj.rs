@@ -1,5 +1,5 @@
 use crate::import;
-use crate::model::{BookmarkSummary, ManagedEntry, ResumeState, RevisionSummary};
+use crate::model::{BookmarkSummary, ManagedEntry, ResumeState, Revision};
 use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 use jj_lib::backend::CommitId;
@@ -92,25 +92,25 @@ impl JjClient {
         Ok(self.workspace_root.join(repo_relative))
     }
 
-    pub(crate) fn resolve_rev(&self, revset: &str) -> Result<RevisionSummary> {
+    pub(crate) fn resolve_rev(&self, revset: &str) -> Result<Revision> {
         let (workspace, repo) = self.load_workspace_and_repo()?;
         let commit = self.resolve_commit_by_revset(&workspace, &repo, revset)?;
-        Ok(self.revision_summary(revset, commit.id()))
+        Ok(self.revision(revset, commit.id()))
     }
 
-    pub(crate) fn root_revision(&self) -> Result<RevisionSummary> {
+    pub(crate) fn root_revision(&self) -> Result<Revision> {
         let (_, repo) = self.load_workspace_and_repo()?;
         let root = repo.store().root_commit();
-        Ok(self.revision_summary("empty-tree", root.id()))
+        Ok(self.revision("empty-tree", root.id()))
     }
 
-    pub(crate) fn current_revision(&self) -> Result<RevisionSummary> {
+    pub(crate) fn current_revision(&self) -> Result<Revision> {
         self.resolve_rev("@")
     }
 
-    pub(crate) fn list_files(&self, rev: &RevisionSummary) -> Result<Vec<PathBuf>> {
-        let (workspace, repo) = self.load_workspace_and_repo()?;
-        let commit = self.resolve_summary_to_commit(&workspace, &repo, rev)?;
+    pub(crate) fn list_files(&self, rev: &Revision) -> Result<Vec<PathBuf>> {
+        let (_, repo) = self.load_workspace_and_repo()?;
+        let commit = self.resolve_revision_to_commit(&repo, rev)?;
         let mut files = commit
             .tree()
             .entries()
@@ -123,11 +123,11 @@ impl JjClient {
 
     pub(crate) fn read_entries_at_rev(
         &self,
-        rev: &RevisionSummary,
+        rev: &Revision,
         paths: &BTreeSet<PathBuf>,
     ) -> Result<BTreeMap<PathBuf, Option<ManagedEntry>>> {
-        let (workspace, repo) = self.load_workspace_and_repo()?;
-        let commit = self.resolve_summary_to_commit(&workspace, &repo, rev)?;
+        let (_, repo) = self.load_workspace_and_repo()?;
+        let commit = self.resolve_revision_to_commit(&repo, rev)?;
         let tree = commit.tree();
         let mut entries = BTreeMap::new();
 
@@ -143,20 +143,19 @@ impl JjClient {
 
     pub(crate) fn resume_state(
         &self,
-        base: &RevisionSummary,
-        current_import: Option<&RevisionSummary>,
+        base: &Revision,
+        current_import: Option<&Revision>,
     ) -> Result<ResumeState> {
-        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let (_, repo) = self.load_workspace_and_repo()?;
         let current = self.current_revision()?;
-        let current_commit = self.resolve_summary_to_commit(&workspace, &repo, &current)?;
+        let current_commit = self.resolve_revision_to_commit(&repo, &current)?;
         let current_is_disposable =
             import::is_disposable_sync_placeholder(repo.as_ref(), &current_commit)?;
 
         match current_import {
             None => Ok(ResumeState::Fresh),
             Some(current_import) => {
-                let import_commit =
-                    self.resolve_summary_to_commit(&workspace, &repo, current_import)?;
+                let import_commit = self.resolve_revision_to_commit(&repo, current_import)?;
                 let current_import_has_conflicts = self.has_conflicts(current_import)?;
                 let current_import_is_descendant_of_base =
                     self.is_ancestor(base, current_import)?;
@@ -174,9 +173,9 @@ impl JjClient {
         }
     }
 
-    pub(crate) fn has_conflicts(&self, rev: &RevisionSummary) -> Result<bool> {
-        let (workspace, repo) = self.load_workspace_and_repo()?;
-        let commit = self.resolve_summary_to_commit(&workspace, &repo, rev)?;
+    pub(crate) fn has_conflicts(&self, rev: &Revision) -> Result<bool> {
+        let (_, repo) = self.load_workspace_and_repo()?;
+        let commit = self.resolve_revision_to_commit(&repo, rev)?;
         Ok(commit.has_conflict())
     }
 
@@ -186,7 +185,7 @@ impl JjClient {
         match target.as_resolved() {
             Some(Some(commit_id)) => Ok(BookmarkSummary {
                 name: name.to_string(),
-                revision: Some(self.revision_summary(name, commit_id)),
+                revision: Some(self.revision(name, commit_id)),
                 exists: true,
             }),
             Some(None) => Ok(BookmarkSummary::missing(name)),
@@ -196,12 +195,12 @@ impl JjClient {
 
     pub(crate) fn is_ancestor(
         &self,
-        ancestor: &RevisionSummary,
-        descendant: &RevisionSummary,
+        ancestor: &Revision,
+        descendant: &Revision,
     ) -> Result<bool> {
-        let (workspace, repo) = self.load_workspace_and_repo()?;
-        let ancestor_commit = self.resolve_summary_to_commit(&workspace, &repo, ancestor)?;
-        let descendant_commit = self.resolve_summary_to_commit(&workspace, &repo, descendant)?;
+        let (_, repo) = self.load_workspace_and_repo()?;
+        let ancestor_commit = self.resolve_revision_to_commit(&repo, ancestor)?;
+        let descendant_commit = self.resolve_revision_to_commit(&repo, descendant)?;
         repo.index()
             .is_ancestor(ancestor_commit.id(), descendant_commit.id())
             .context("failed to query jj ancestry")
@@ -234,21 +233,14 @@ impl JjClient {
         Ok((workspace, repo))
     }
 
-    fn resolve_summary_to_commit(
+    fn resolve_revision_to_commit(
         &self,
-        workspace: &Workspace,
         repo: &Arc<ReadonlyRepo>,
-        rev: &RevisionSummary,
+        rev: &Revision,
     ) -> Result<Commit> {
-        if let Some(hex) = &rev.resolved {
-            let commit_id = CommitId::try_from_hex(hex)
-                .ok_or_else(|| anyhow!("invalid commit id `{hex}` stored in revision summary"))?;
-            return repo
-                .store()
-                .get_commit(&commit_id)
-                .with_context(|| format!("failed to load commit `{hex}`"));
-        }
-        self.resolve_commit_by_revset(workspace, repo, &rev.expression)
+        repo.store()
+            .get_commit(rev.id())
+            .with_context(|| format!("failed to load commit `{}`", rev.id().hex()))
     }
 
     fn resolve_commit_by_revset(
@@ -375,34 +367,21 @@ impl JjClient {
         }
     }
 
-    fn revision_summary(
-        &self,
-        expression: impl Into<String>,
-        commit_id: &CommitId,
-    ) -> RevisionSummary {
-        RevisionSummary::resolved(expression, commit_id.hex())
+    fn revision(&self, expression: impl Into<String>, commit_id: &CommitId) -> Revision {
+        Revision::new(commit_id.clone(), expression)
     }
 }
 
 fn resume_state_for_commits(
-    base: &RevisionSummary,
-    current: &RevisionSummary,
+    base: &Revision,
+    current: &Revision,
     current_commit: &Commit,
-    current_import: &RevisionSummary,
+    current_import: &Revision,
     import_commit: &Commit,
     current_import_has_conflicts: bool,
     current_import_is_descendant_of_base: bool,
     current_is_disposable: bool,
 ) -> ResumeState {
-    if current_import.resolved.is_none() {
-        return ResumeState::Blocked {
-            reason: format!(
-                "`current-import` ({}) is unresolved\n\nresolve the bookmark before rerunning `dotmerge sync`.",
-                current_import.short_id()
-            ),
-        };
-    }
-
     if current_import_has_conflicts {
         return ResumeState::Blocked {
             reason: format!(
@@ -422,7 +401,7 @@ fn resume_state_for_commits(
         };
     }
 
-    if current.same_revision(current_import) {
+    if current.same(current_import) {
         return ResumeState::Resumable;
     }
 
@@ -459,22 +438,22 @@ impl JjSession {
         self.tx.repo()
     }
 
-    pub(crate) fn resolve_rev(&self, revset: &str) -> Result<RevisionSummary> {
+    pub(crate) fn resolve_rev(&self, revset: &str) -> Result<Revision> {
         let commit = self.resolve_commit_by_revset(revset)?;
-        Ok(self.revision_summary(revset, commit.id()))
+        Ok(self.revision(revset, commit.id()))
     }
 
-    pub(crate) fn root_revision(&self) -> Result<RevisionSummary> {
+    pub(crate) fn root_revision(&self) -> Result<Revision> {
         let root = self.repo().store().root_commit();
-        Ok(self.revision_summary("empty-tree", root.id()))
+        Ok(self.revision("empty-tree", root.id()))
     }
 
-    pub(crate) fn current_revision(&self) -> Result<RevisionSummary> {
+    pub(crate) fn current_revision(&self) -> Result<Revision> {
         self.resolve_rev("@")
     }
 
-    pub(crate) fn list_files(&self, rev: &RevisionSummary) -> Result<Vec<PathBuf>> {
-        let commit = self.resolve_summary_to_commit(rev)?;
+    pub(crate) fn list_files(&self, rev: &Revision) -> Result<Vec<PathBuf>> {
+        let commit = self.resolve_revision_to_commit(rev)?;
         let mut files = commit
             .tree()
             .entries()
@@ -487,10 +466,10 @@ impl JjSession {
 
     pub(crate) fn read_entries_at_rev(
         &self,
-        rev: &RevisionSummary,
+        rev: &Revision,
         paths: &BTreeSet<PathBuf>,
     ) -> Result<BTreeMap<PathBuf, Option<ManagedEntry>>> {
-        let commit = self.resolve_summary_to_commit(rev)?;
+        let commit = self.resolve_revision_to_commit(rev)?;
         let tree = commit.tree();
         let mut entries = BTreeMap::new();
 
@@ -503,8 +482,8 @@ impl JjSession {
         Ok(entries)
     }
 
-    pub(crate) fn complete_sync(&mut self, exported: &RevisionSummary) -> Result<()> {
-        let commit = self.resolve_summary_to_commit(exported)?;
+    pub(crate) fn complete_sync(&mut self, exported: &Revision) -> Result<()> {
+        let commit = self.resolve_revision_to_commit(exported)?;
         self.tx.repo_mut().set_local_bookmark_target(
             "last-sync".as_ref(),
             RefTarget::normal(commit.id().clone()),
@@ -522,18 +501,18 @@ impl JjSession {
 
     pub(crate) fn resume_state(
         &self,
-        base: &RevisionSummary,
-        current_import: Option<&RevisionSummary>,
+        base: &Revision,
+        current_import: Option<&Revision>,
     ) -> Result<ResumeState> {
         let current = self.current_revision()?;
-        let current_commit = self.resolve_summary_to_commit(&current)?;
+        let current_commit = self.resolve_revision_to_commit(&current)?;
         let current_is_disposable =
             import::is_disposable_sync_placeholder(self.repo(), &current_commit)?;
 
         match current_import {
             None => Ok(ResumeState::Fresh),
             Some(current_import) => {
-                let import_commit = self.resolve_summary_to_commit(current_import)?;
+                let import_commit = self.resolve_revision_to_commit(current_import)?;
                 let current_import_has_conflicts = self.has_conflicts(current_import)?;
                 let current_import_is_descendant_of_base =
                     self.is_ancestor(base, current_import)?;
@@ -551,8 +530,8 @@ impl JjSession {
         }
     }
 
-    pub(crate) fn has_conflicts(&self, rev: &RevisionSummary) -> Result<bool> {
-        let commit = self.resolve_summary_to_commit(rev)?;
+    pub(crate) fn has_conflicts(&self, rev: &Revision) -> Result<bool> {
+        let commit = self.resolve_revision_to_commit(rev)?;
         Ok(commit.has_conflict())
     }
 
@@ -561,7 +540,7 @@ impl JjSession {
         match target.as_resolved() {
             Some(Some(commit_id)) => Ok(BookmarkSummary {
                 name: name.to_string(),
-                revision: Some(self.revision_summary(name, commit_id)),
+                revision: Some(self.revision(name, commit_id)),
                 exists: true,
             }),
             Some(None) => Ok(BookmarkSummary::missing(name)),
@@ -571,11 +550,11 @@ impl JjSession {
 
     pub(crate) fn is_ancestor(
         &self,
-        ancestor: &RevisionSummary,
-        descendant: &RevisionSummary,
+        ancestor: &Revision,
+        descendant: &Revision,
     ) -> Result<bool> {
-        let ancestor_commit = self.resolve_summary_to_commit(ancestor)?;
-        let descendant_commit = self.resolve_summary_to_commit(descendant)?;
+        let ancestor_commit = self.resolve_revision_to_commit(ancestor)?;
+        let descendant_commit = self.resolve_revision_to_commit(descendant)?;
         self.repo()
             .index()
             .is_ancestor(ancestor_commit.id(), descendant_commit.id())
@@ -591,8 +570,8 @@ impl JjSession {
         )
     }
 
-    pub(crate) fn checkout_revision(&mut self, rev: &RevisionSummary) -> Result<()> {
-        let commit = self.resolve_summary_to_commit(rev)?;
+    pub(crate) fn checkout_revision(&mut self, rev: &Revision) -> Result<()> {
+        let commit = self.resolve_revision_to_commit(rev)?;
         self.tx
             .repo_mut()
             .edit(self.workspace.workspace_name().to_owned(), &commit)
@@ -610,9 +589,9 @@ impl JjSession {
 
     pub(crate) fn create_new_change(
         &mut self,
-        parents: &[RevisionSummary],
+        parents: &[Revision],
         message: &str,
-    ) -> Result<RevisionSummary> {
+    ) -> Result<Revision> {
         if parents.is_empty() {
             return Err(anyhow!(
                 "create_new_change requires at least one parent revision"
@@ -621,7 +600,7 @@ impl JjSession {
 
         let parent_commits = parents
             .iter()
-            .map(|parent| self.resolve_summary_to_commit(parent))
+            .map(|parent| self.resolve_revision_to_commit(parent))
             .collect::<Result<Vec<_>>>()?;
         let parent_ids = parent_commits
             .iter()
@@ -640,7 +619,7 @@ impl JjSession {
             .block_on()
             .context("failed to write new commit")?;
         self.dirty = true;
-        Ok(self.revision_summary(commit.id().hex(), commit.id()))
+        Ok(self.revision(commit.id().hex(), commit.id()))
     }
 
     pub(crate) fn finish(mut self, message: impl Into<String>) -> Result<()> {
@@ -660,17 +639,11 @@ impl JjSession {
         Ok(())
     }
 
-    pub(crate) fn resolve_summary_to_commit(&self, rev: &RevisionSummary) -> Result<Commit> {
-        let repo = self.repo();
-        if let Some(hex) = &rev.resolved {
-            let commit_id = CommitId::try_from_hex(hex)
-                .ok_or_else(|| anyhow!("invalid commit id `{hex}` stored in revision summary"))?;
-            return repo
-                .store()
-                .get_commit(&commit_id)
-                .with_context(|| format!("failed to load commit `{hex}`"));
-        }
-        self.resolve_commit_by_revset(&rev.expression)
+    pub(crate) fn resolve_revision_to_commit(&self, rev: &Revision) -> Result<Commit> {
+        self.repo()
+            .store()
+            .get_commit(rev.id())
+            .with_context(|| format!("failed to load commit `{}`", rev.id().hex()))
     }
 
     fn resolve_commit_by_revset(&self, revset: &str) -> Result<Commit> {
@@ -795,12 +768,8 @@ impl JjSession {
         }
     }
 
-    fn revision_summary(
-        &self,
-        expression: impl Into<String>,
-        commit_id: &CommitId,
-    ) -> RevisionSummary {
-        RevisionSummary::resolved(expression, commit_id.hex())
+    fn revision(&self, expression: impl Into<String>, commit_id: &CommitId) -> Revision {
+        Revision::new(commit_id.clone(), expression)
     }
 }
 

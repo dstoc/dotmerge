@@ -3,7 +3,7 @@ use crate::export;
 use crate::import;
 use crate::jj::JjClient;
 use crate::merge;
-use crate::model::{ResumeState, RevisionSummary};
+use crate::model::{ResumeState, Revision};
 use crate::status;
 use crate::util;
 use anyhow::{anyhow, Result};
@@ -34,7 +34,7 @@ pub fn run(args: SyncArgs) -> Result<()> {
     let imported = import::create_or_refresh_import(&mut session, &base, &home, &managed_paths)?;
     let merged = merge::merge_revisions(&mut session, &imported, &target)?;
     let current = session.current_revision()?;
-    if !merged.same_revision(&current) {
+    if !merged.same(&current) {
         session.checkout_revision(&merged)?;
     }
 
@@ -62,8 +62,8 @@ pub fn run(args: SyncArgs) -> Result<()> {
 
 fn validate_resume_state(
     session: &impl status::StatusSource,
-    base: &RevisionSummary,
-    current_import: Option<&RevisionSummary>,
+    base: &Revision,
+    current_import: Option<&Revision>,
 ) -> Result<()> {
     match session.resume_state(base, current_import)? {
         ResumeState::Fresh | ResumeState::Resumable => Ok(()),

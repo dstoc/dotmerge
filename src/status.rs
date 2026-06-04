@@ -2,8 +2,7 @@ use crate::cli::StatusArgs;
 use crate::fs;
 use crate::jj::{JjClient, JjSession};
 use crate::model::{
-    FileChangeKind, FileStatusSummary, ManagedEntry, ResumeState, RevisionSummary,
-    SyncStatusSummary,
+    FileChangeKind, FileStatusSummary, ManagedEntry, ResumeState, Revision, SyncStatusSummary,
 };
 use crate::util;
 use anyhow::Result;
@@ -11,22 +10,21 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 pub(crate) trait StatusSource {
-    fn root_revision(&self) -> Result<RevisionSummary>;
-    fn current_revision(&self) -> Result<RevisionSummary>;
-    fn list_files(&self, rev: &RevisionSummary) -> Result<Vec<PathBuf>>;
+    fn root_revision(&self) -> Result<Revision>;
+    fn current_revision(&self) -> Result<Revision>;
+    fn list_files(&self, rev: &Revision) -> Result<Vec<PathBuf>>;
     fn read_entries_at_rev(
         &self,
-        rev: &RevisionSummary,
+        rev: &Revision,
         paths: &BTreeSet<PathBuf>,
     ) -> Result<std::collections::BTreeMap<PathBuf, Option<ManagedEntry>>>;
-    fn has_conflicts(&self, rev: &RevisionSummary) -> Result<bool>;
+    fn has_conflicts(&self, rev: &Revision) -> Result<bool>;
     fn bookmark_summary(&self, name: &str) -> Result<crate::model::BookmarkSummary>;
-    fn is_ancestor(&self, ancestor: &RevisionSummary, descendant: &RevisionSummary)
-        -> Result<bool>;
+    fn is_ancestor(&self, ancestor: &Revision, descendant: &Revision) -> Result<bool>;
     fn resume_state(
         &self,
-        base: &RevisionSummary,
-        current_import: Option<&RevisionSummary>,
+        base: &Revision,
+        current_import: Option<&Revision>,
     ) -> Result<ResumeState>;
     fn working_copy_clean_hint(&self) -> Result<Option<bool>> {
         Ok(None)
@@ -48,7 +46,7 @@ pub(crate) fn collect(
     source: &impl StatusSource,
     repo_path: &Path,
     home: &Path,
-    target: RevisionSummary,
+    target: Revision,
 ) -> Result<SyncStatusSummary> {
     collect_with_repo_clean(source, repo_path, home, target, None)
 }
@@ -57,7 +55,7 @@ pub(crate) fn collect_for_sync(
     source: &impl StatusSource,
     repo_path: &Path,
     home: &Path,
-    target: RevisionSummary,
+    target: Revision,
 ) -> Result<SyncStatusSummary> {
     collect_with_repo_clean(source, repo_path, home, target, Some(true))
 }
@@ -66,7 +64,7 @@ fn collect_with_repo_clean(
     source: &impl StatusSource,
     repo_path: &Path,
     home: &Path,
-    target: RevisionSummary,
+    target: Revision,
     repo_clean_override: Option<bool>,
 ) -> Result<SyncStatusSummary> {
     let last_sync = source.bookmark_summary("last-sync")?;
@@ -78,9 +76,9 @@ fn collect_with_repo_clean(
     let current = source.current_revision()?;
     let resume_state = source.resume_state(&base, current_import.revision.as_ref())?;
     let mut summary = SyncStatusSummary::new(
-        base.clone(),
+        base.to_summary(),
         current_import.clone(),
-        target.clone(),
+        target.to_summary(),
         repo_path.to_path_buf(),
     );
     let target_already_applied = source.is_ancestor(&target, &current)?;
@@ -139,9 +137,8 @@ fn collect_with_repo_clean(
         summary.notes.push(note);
     }
     if let Some(import_revision) = current_import.revision.as_ref() {
-        if matches!(resume_state, ResumeState::Resumable) && !current.same_revision(import_revision)
-        {
-            summary.prepared = Some(current.clone());
+        if matches!(resume_state, ResumeState::Resumable) && !current.same(import_revision) {
+            summary.prepared = Some(current.to_summary());
         }
     }
 
@@ -198,13 +195,13 @@ fn collect_with_repo_clean(
 
 fn current_import_note(
     resume_state: &ResumeState,
-    current: &RevisionSummary,
-    current_import: Option<&RevisionSummary>,
+    current: &Revision,
+    current_import: Option<&Revision>,
 ) -> Option<String> {
     match resume_state {
         ResumeState::Fresh => Some("`current-import` is missing; sync will start fresh.".to_string()),
         ResumeState::Resumable => current_import.map(|import_revision| {
-            if current.same_revision(import_revision) {
+            if current.same(import_revision) {
                 "`current-import` already matches `@` and will be refreshed on sync.".to_string()
             } else {
                 "sync will replace `current-import` with a direct child of the current repo-side `@` state before refreshing it.".to_string()
@@ -292,7 +289,7 @@ pub fn print_summary(summary: &SyncStatusSummary) {
 
 pub(crate) fn managed_paths(
     source: &impl StatusSource,
-    target: &RevisionSummary,
+    target: &Revision,
 ) -> Result<BTreeSet<PathBuf>> {
     let current = source.current_revision()?;
     if source.is_ancestor(target, &current)? {
@@ -331,27 +328,27 @@ pub(crate) fn is_working_copy_clean(source: &impl StatusSource, repo_path: &Path
 }
 
 impl StatusSource for JjClient {
-    fn root_revision(&self) -> Result<RevisionSummary> {
+    fn root_revision(&self) -> Result<Revision> {
         JjClient::root_revision(self)
     }
 
-    fn current_revision(&self) -> Result<RevisionSummary> {
+    fn current_revision(&self) -> Result<Revision> {
         JjClient::current_revision(self)
     }
 
-    fn list_files(&self, rev: &RevisionSummary) -> Result<Vec<PathBuf>> {
+    fn list_files(&self, rev: &Revision) -> Result<Vec<PathBuf>> {
         JjClient::list_files(self, rev)
     }
 
     fn read_entries_at_rev(
         &self,
-        rev: &RevisionSummary,
+        rev: &Revision,
         paths: &BTreeSet<PathBuf>,
     ) -> Result<std::collections::BTreeMap<PathBuf, Option<ManagedEntry>>> {
         JjClient::read_entries_at_rev(self, rev, paths)
     }
 
-    fn has_conflicts(&self, rev: &RevisionSummary) -> Result<bool> {
+    fn has_conflicts(&self, rev: &Revision) -> Result<bool> {
         JjClient::has_conflicts(self, rev)
     }
 
@@ -361,16 +358,16 @@ impl StatusSource for JjClient {
 
     fn is_ancestor(
         &self,
-        ancestor: &RevisionSummary,
-        descendant: &RevisionSummary,
+        ancestor: &Revision,
+        descendant: &Revision,
     ) -> Result<bool> {
         JjClient::is_ancestor(self, ancestor, descendant)
     }
 
     fn resume_state(
         &self,
-        base: &RevisionSummary,
-        current_import: Option<&RevisionSummary>,
+        base: &Revision,
+        current_import: Option<&Revision>,
     ) -> Result<ResumeState> {
         JjClient::resume_state(self, base, current_import)
     }
@@ -381,27 +378,27 @@ impl StatusSource for JjClient {
 }
 
 impl StatusSource for JjSession {
-    fn root_revision(&self) -> Result<RevisionSummary> {
+    fn root_revision(&self) -> Result<Revision> {
         JjSession::root_revision(self)
     }
 
-    fn current_revision(&self) -> Result<RevisionSummary> {
+    fn current_revision(&self) -> Result<Revision> {
         JjSession::current_revision(self)
     }
 
-    fn list_files(&self, rev: &RevisionSummary) -> Result<Vec<PathBuf>> {
+    fn list_files(&self, rev: &Revision) -> Result<Vec<PathBuf>> {
         JjSession::list_files(self, rev)
     }
 
     fn read_entries_at_rev(
         &self,
-        rev: &RevisionSummary,
+        rev: &Revision,
         paths: &BTreeSet<PathBuf>,
     ) -> Result<std::collections::BTreeMap<PathBuf, Option<ManagedEntry>>> {
         JjSession::read_entries_at_rev(self, rev, paths)
     }
 
-    fn has_conflicts(&self, rev: &RevisionSummary) -> Result<bool> {
+    fn has_conflicts(&self, rev: &Revision) -> Result<bool> {
         JjSession::has_conflicts(self, rev)
     }
 
@@ -411,16 +408,16 @@ impl StatusSource for JjSession {
 
     fn is_ancestor(
         &self,
-        ancestor: &RevisionSummary,
-        descendant: &RevisionSummary,
+        ancestor: &Revision,
+        descendant: &Revision,
     ) -> Result<bool> {
         JjSession::is_ancestor(self, ancestor, descendant)
     }
 
     fn resume_state(
         &self,
-        base: &RevisionSummary,
-        current_import: Option<&RevisionSummary>,
+        base: &Revision,
+        current_import: Option<&Revision>,
     ) -> Result<ResumeState> {
         JjSession::resume_state(self, base, current_import)
     }

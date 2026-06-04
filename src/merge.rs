@@ -1,6 +1,6 @@
 use crate::import;
 use crate::jj::JjSession;
-use crate::model::RevisionSummary;
+use crate::model::Revision;
 use crate::util;
 use anyhow::Result;
 use jj_lib::commit::Commit;
@@ -8,11 +8,11 @@ use jj_lib::object_id::ObjectId as _;
 
 pub(crate) fn merge_revisions(
     session: &mut JjSession,
-    left: &RevisionSummary,
-    right: &RevisionSummary,
-) -> Result<RevisionSummary> {
+    left: &Revision,
+    right: &Revision,
+) -> Result<Revision> {
     let current = session.current_revision()?;
-    let current_commit = session.resolve_summary_to_commit(&current)?;
+    let current_commit = session.resolve_revision_to_commit(&current)?;
     let (left, right) = normalize_disposable_current_in_merge_inputs(
         session.repo(),
         &current,
@@ -34,17 +34,17 @@ pub(crate) fn merge_revisions(
 
 pub(crate) fn normalize_disposable_current_in_merge_inputs(
     repo: &dyn jj_lib::repo::Repo,
-    current: &RevisionSummary,
+    current: &Revision,
     current_commit: &Commit,
-    left: &RevisionSummary,
-    right: &RevisionSummary,
-) -> Result<(RevisionSummary, RevisionSummary)> {
+    left: &Revision,
+    right: &Revision,
+) -> Result<(Revision, Revision)> {
     import::normalize_disposable_current_in_merge_inputs(repo, current, current_commit, left, right)
 }
 
 pub(crate) fn merge_description_for_target(
     session: &JjSession,
-    target: &RevisionSummary,
+    target: &Revision,
 ) -> Result<String> {
     Ok(format!(
         "dotmerge: merge {} changes into {}",
@@ -53,8 +53,8 @@ pub(crate) fn merge_description_for_target(
     ))
 }
 
-fn target_label(session: &JjSession, target: &RevisionSummary) -> Result<String> {
-    let commit = session.resolve_summary_to_commit(target)?;
+fn target_label(session: &JjSession, target: &Revision) -> Result<String> {
+    let commit = session.resolve_revision_to_commit(target)?;
     let mut names = Vec::new();
     for (name, _) in session
         .repo()

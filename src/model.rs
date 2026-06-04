@@ -1,4 +1,41 @@
 use std::path::PathBuf;
+use jj_lib::backend::CommitId;
+use jj_lib::object_id::ObjectId as _;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Revision {
+    id: CommitId,
+    label: String,
+}
+
+impl Revision {
+    pub(crate) fn new(id: CommitId, label: impl Into<String>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+        }
+    }
+
+    pub(crate) fn id(&self) -> &CommitId {
+        &self.id
+    }
+
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub(crate) fn short_id(&self) -> String {
+        self.id.hex()[..8].to_string()
+    }
+
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+
+    pub(crate) fn to_summary(&self) -> RevisionSummary {
+        RevisionSummary::resolved(self.label.clone(), self.id.hex())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RevisionSummary {
@@ -20,19 +57,12 @@ impl RevisionSummary {
             .map(|hex| hex.chars().take(8).collect())
             .unwrap_or_else(|| self.expression.clone())
     }
-
-    pub(crate) fn same_revision(&self, other: &Self) -> bool {
-        match (&self.resolved, &other.resolved) {
-            (Some(left), Some(right)) => left == right,
-            _ => self.expression == other.expression,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BookmarkSummary {
     pub(crate) name: String,
-    pub(crate) revision: Option<RevisionSummary>,
+    pub(crate) revision: Option<Revision>,
     pub(crate) exists: bool,
 }
 

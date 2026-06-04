@@ -1,6 +1,6 @@
 use crate::fs;
 use crate::jj::JjSession;
-use crate::model::{ManagedEntry, RevisionSummary};
+use crate::model::{ManagedEntry, Revision};
 use crate::util;
 use anyhow::{anyhow, Context, Result};
 use jj_lib::backend::TreeId;
@@ -24,14 +24,14 @@ pub(crate) enum ImportPlacement {
 
 pub(crate) fn create_or_refresh_import(
     session: &mut JjSession,
-    base: &RevisionSummary,
+    base: &Revision,
     home_state: &Path,
     managed_paths: &BTreeSet<PathBuf>,
-) -> Result<RevisionSummary> {
+) -> Result<Revision> {
     let current = session.current_revision()?;
-    let current_commit = session.resolve_summary_to_commit(&current)?;
+    let current_commit = session.resolve_revision_to_commit(&current)?;
     let current_import = session.bookmark_summary("current-import")?;
-    let base_commit = session.resolve_summary_to_commit(base)?;
+    let base_commit = session.resolve_revision_to_commit(base)?;
 
     let (current_commit, current_import, current_tree_id, imported_tree_id) = {
         let repo = session.repo();
@@ -42,7 +42,7 @@ pub(crate) fn create_or_refresh_import(
             .ok_or_else(|| {
                 anyhow!(
                     "base revision `{}` must have a resolved tree",
-                    base.expression
+                    base.label()
                 )
             })?;
 
@@ -129,7 +129,7 @@ pub(crate) fn create_or_refresh_import(
     let current_import_commit = current_import
         .revision
         .as_ref()
-        .map(|revision| session.resolve_summary_to_commit(revision))
+        .map(|revision| session.resolve_revision_to_commit(revision))
         .transpose()?;
     let placement = decide_import_placement(
         session.repo(),
@@ -187,9 +187,9 @@ pub(crate) fn create_or_refresh_import(
         RefTarget::normal(commit.id().clone()),
     );
     session.mark_dirty();
-    Ok(RevisionSummary::resolved(
+    Ok(Revision::new(
+        commit.id().clone(),
         "current-import",
-        commit.id().hex(),
     ))
 }
 
@@ -232,15 +232,15 @@ pub(crate) fn is_disposable_sync_placeholder(
 
 pub(crate) fn normalize_disposable_current_in_merge_inputs(
     repo: &dyn jj_lib::repo::Repo,
-    current: &RevisionSummary,
+    current: &Revision,
     current_commit: &Commit,
-    left: &RevisionSummary,
-    right: &RevisionSummary,
-) -> Result<(RevisionSummary, RevisionSummary)> {
+    left: &Revision,
+    right: &Revision,
+) -> Result<(Revision, Revision)> {
     if !is_disposable_sync_placeholder(repo, current_commit)? {
         return Ok((left.clone(), right.clone()));
     }
-    if left.same_revision(current) && right.same_revision(current) {
+    if left.same(current) && right.same(current) {
         return Ok((left.clone(), right.clone()));
     }
 
@@ -250,14 +250,14 @@ pub(crate) fn normalize_disposable_current_in_merge_inputs(
         .cloned()
         .ok_or_else(|| anyhow!("disposable current `@` must have exactly one parent"))?;
     let parent_hex = parent_id.hex();
-    let parent = RevisionSummary::resolved(parent_hex.clone(), parent_hex);
+    let parent = Revision::new(parent_id, parent_hex);
 
-    let left = if left.same_revision(current) {
+    let left = if left.same(current) {
         parent.clone()
     } else {
         left.clone()
     };
-    let right = if right.same_revision(current) {
+    let right = if right.same(current) {
         parent
     } else {
         right.clone()
@@ -409,23 +409,27 @@ mod tests {
         let fixture = TestRepo::init()?;
         let root_id = fixture.repo.store().root_commit_id().clone();
         let parent_hex = root_id.hex();
-        let parent_summary = RevisionSummary::resolved(parent_hex.clone(), parent_hex);
+        let parent = Revision::new(root_id.clone(), parent_hex);
 
         let mut tx = fixture.repo.start_transaction();
-        let current = new_commit(&mut tx, vec![root_id], root_tree(&fixture.repo), "")?;
+        let current_commit = new_commit(&mut tx, vec![root_id], root_tree(&fixture.repo), "")?;
+        let current = Revision::new(current_commit.id().clone(), "@");
 
-        let left = RevisionSummary::resolved("@", current.id().hex());
-        let right = RevisionSummary::resolved("other", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+        let left = current.clone();
+        let right = Revision::new(
+            CommitId::from_hex("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+            "other",
+        );
 
         let (normalized_left, normalized_right) = normalize_disposable_current_in_merge_inputs(
             fixture.repo.as_ref(),
-            &left,
             &current,
+            &current_commit,
             &left,
             &right,
         )?;
 
-        assert_eq!(normalized_left, parent_summary);
+        assert_eq!(normalized_left, parent);
         assert_eq!(normalized_right, right);
         Ok(())
     }
