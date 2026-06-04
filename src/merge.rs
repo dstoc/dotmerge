@@ -3,7 +3,6 @@ use crate::jj::JjSession;
 use crate::model::Revision;
 use crate::util;
 use anyhow::Result;
-use jj_lib::commit::Commit;
 use jj_lib::object_id::ObjectId as _;
 
 pub(crate) fn merge_revisions(
@@ -13,7 +12,7 @@ pub(crate) fn merge_revisions(
 ) -> Result<Revision> {
     let current = session.current_revision()?;
     let current_commit = session.resolve_revision_to_commit(&current)?;
-    let (left, right) = normalize_disposable_current_in_merge_inputs(
+    let (left, right) = import::normalize_disposable_current_in_merge_inputs(
         session.repo(),
         &current,
         &current_commit,
@@ -30,16 +29,6 @@ pub(crate) fn merge_revisions(
 
     let merge_description = merge_description_for_target(session, &right)?;
     session.create_new_change(&[left, right], &merge_description)
-}
-
-pub(crate) fn normalize_disposable_current_in_merge_inputs(
-    repo: &dyn jj_lib::repo::Repo,
-    current: &Revision,
-    current_commit: &Commit,
-    left: &Revision,
-    right: &Revision,
-) -> Result<(Revision, Revision)> {
-    import::normalize_disposable_current_in_merge_inputs(repo, current, current_commit, left, right)
 }
 
 pub(crate) fn merge_description_for_target(

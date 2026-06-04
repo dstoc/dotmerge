@@ -26,9 +26,7 @@ pub(crate) trait StatusSource {
         base: &Revision,
         current_import: Option<&Revision>,
     ) -> Result<ResumeState>;
-    fn working_copy_clean_hint(&self) -> Result<Option<bool>> {
-        Ok(None)
-    }
+    fn working_copy_clean_hint(&self) -> Result<Option<bool>>;
 }
 
 pub fn run(args: StatusArgs) -> Result<()> {
@@ -304,77 +302,10 @@ pub(crate) fn managed_paths(
     Ok(paths)
 }
 
-pub(crate) fn is_working_copy_clean(source: &impl StatusSource, repo_path: &Path) -> Result<bool> {
-    if let Some(clean) = source.working_copy_clean_hint()? {
-        return Ok(clean);
-    }
-
-    let current = source.current_revision()?;
-    let tracked_paths = source.list_files(&current)?;
-    let repo_paths = fs::list_repo_paths(repo_path)?;
-    let mut managed_paths = tracked_paths.into_iter().collect::<BTreeSet<_>>();
-    managed_paths.extend(repo_paths);
-
-    let current_entries = source.read_entries_at_rev(&current, &managed_paths)?;
-    for path in managed_paths {
-        let fs_entry = fs::read_rooted_entry(repo_path, &path)?;
-        let tree_entry = current_entries.get(&path).cloned().flatten();
-        if tree_entry != fs_entry {
-            return Ok(false);
-        }
-    }
-
-    Ok(true)
-}
-
-impl StatusSource for JjClient {
-    fn root_revision(&self) -> Result<Revision> {
-        JjClient::root_revision(self)
-    }
-
-    fn current_revision(&self) -> Result<Revision> {
-        JjClient::current_revision(self)
-    }
-
-    fn list_files(&self, rev: &Revision) -> Result<Vec<PathBuf>> {
-        JjClient::list_files(self, rev)
-    }
-
-    fn read_entries_at_rev(
-        &self,
-        rev: &Revision,
-        paths: &BTreeSet<PathBuf>,
-    ) -> Result<std::collections::BTreeMap<PathBuf, Option<ManagedEntry>>> {
-        JjClient::read_entries_at_rev(self, rev, paths)
-    }
-
-    fn has_conflicts(&self, rev: &Revision) -> Result<bool> {
-        JjClient::has_conflicts(self, rev)
-    }
-
-    fn bookmark_summary(&self, name: &str) -> Result<crate::model::BookmarkSummary> {
-        JjClient::bookmark_summary(self, name)
-    }
-
-    fn is_ancestor(
-        &self,
-        ancestor: &Revision,
-        descendant: &Revision,
-    ) -> Result<bool> {
-        JjClient::is_ancestor(self, ancestor, descendant)
-    }
-
-    fn resume_state(
-        &self,
-        base: &Revision,
-        current_import: Option<&Revision>,
-    ) -> Result<ResumeState> {
-        JjClient::resume_state(self, base, current_import)
-    }
-
-    fn working_copy_clean_hint(&self) -> Result<Option<bool>> {
-        Ok(Some(JjClient::is_working_copy_clean(self)?))
-    }
+pub(crate) fn is_working_copy_clean(source: &impl StatusSource, _repo_path: &Path) -> Result<bool> {
+    source.working_copy_clean_hint()?.ok_or_else(|| {
+        anyhow::anyhow!("StatusSource did not provide a working_copy_clean_hint")
+    })
 }
 
 impl StatusSource for JjSession {

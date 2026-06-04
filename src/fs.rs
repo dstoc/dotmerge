@@ -1,6 +1,5 @@
 use crate::model::{AddSourceKind, ManagedEntry, ValidatedAddSource};
 use anyhow::{anyhow, Context, Result};
-use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::fs::OpenOptions;
@@ -164,12 +163,6 @@ pub fn copy_add_source(source: &ValidatedAddSource, destination_path: &Path) -> 
     Ok(())
 }
 
-pub fn list_repo_paths(repo_root: &Path) -> Result<BTreeSet<PathBuf>> {
-    let mut paths = BTreeSet::new();
-    collect_repo_paths(repo_root, repo_root, &mut paths)?;
-    Ok(paths)
-}
-
 pub fn read_rooted_entry(root: &Path, repo_relative: &Path) -> Result<Option<ManagedEntry>> {
     let path = root.join(repo_relative);
     match fs::symlink_metadata(&path) {
@@ -330,41 +323,6 @@ fn normalize_absolute_path(path: &Path) -> Result<PathBuf> {
     }
 
     Ok(normalized)
-}
-
-fn collect_repo_paths(root: &Path, current: &Path, paths: &mut BTreeSet<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(current)
-        .with_context(|| format!("failed to read directory `{}`", current.display()))?
-    {
-        let entry =
-            entry.with_context(|| format!("failed to read entry under `{}`", current.display()))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("failed to read file type for `{}`", path.display()))?;
-
-        if current == root && (entry.file_name() == ".jj" || entry.file_name() == ".git") {
-            continue;
-        }
-
-        if file_type.is_dir() {
-            collect_repo_paths(root, &path, paths)?;
-        } else if file_type.is_file() || file_type.is_symlink() {
-            let relative = path
-                .strip_prefix(root)
-                .map(Path::to_path_buf)
-                .map_err(|_| {
-                    anyhow!(
-                        "path `{}` escaped repo root `{}`",
-                        path.display(),
-                        root.display()
-                    )
-                })?;
-            paths.insert(relative);
-        }
-    }
-
-    Ok(())
 }
 
 fn write_atomic_file(destination: &Path, contents: &[u8], executable: bool) -> Result<()> {

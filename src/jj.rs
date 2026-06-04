@@ -16,7 +16,7 @@ use jj_lib::matchers::{EverythingMatcher, NothingMatcher};
 use jj_lib::merge::SameChange;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::RefTarget;
-use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _, StoreFactories};
+use jj_lib::repo::{MutableRepo, ReadonlyRepo, StoreFactories};
 use jj_lib::repo_path::{RepoPath, RepoPathBuf, RepoPathUiConverter};
 use jj_lib::revset::{
     parse, RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions, RevsetParseContext,
@@ -92,126 +92,6 @@ impl JjClient {
         Ok(self.workspace_root.join(repo_relative))
     }
 
-    pub(crate) fn resolve_rev(&self, revset: &str) -> Result<Revision> {
-        let (workspace, repo) = self.load_workspace_and_repo()?;
-        let commit = self.resolve_commit_by_revset(&workspace, &repo, revset)?;
-        Ok(self.revision(revset, commit.id()))
-    }
-
-    pub(crate) fn root_revision(&self) -> Result<Revision> {
-        let (_, repo) = self.load_workspace_and_repo()?;
-        let root = repo.store().root_commit();
-        Ok(self.revision("empty-tree", root.id()))
-    }
-
-    pub(crate) fn current_revision(&self) -> Result<Revision> {
-        self.resolve_rev("@")
-    }
-
-    pub(crate) fn list_files(&self, rev: &Revision) -> Result<Vec<PathBuf>> {
-        let (_, repo) = self.load_workspace_and_repo()?;
-        let commit = self.resolve_revision_to_commit(&repo, rev)?;
-        let mut files = commit
-            .tree()
-            .entries()
-            .map(|(path, _)| path.to_fs_path(Path::new("")))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to convert repo paths to filesystem paths")?;
-        files.sort();
-        Ok(files)
-    }
-
-    pub(crate) fn read_entries_at_rev(
-        &self,
-        rev: &Revision,
-        paths: &BTreeSet<PathBuf>,
-    ) -> Result<BTreeMap<PathBuf, Option<ManagedEntry>>> {
-        let (_, repo) = self.load_workspace_and_repo()?;
-        let commit = self.resolve_revision_to_commit(&repo, rev)?;
-        let tree = commit.tree();
-        let mut entries = BTreeMap::new();
-
-        for path in paths {
-            let repo_path = self.parse_repo_path(path)?;
-            let entry =
-                self.read_entry_from_tree(repo.as_ref(), &tree, repo_path.as_ref(), path)?;
-            entries.insert(path.clone(), entry);
-        }
-
-        Ok(entries)
-    }
-
-    pub(crate) fn resume_state(
-        &self,
-        base: &Revision,
-        current_import: Option<&Revision>,
-    ) -> Result<ResumeState> {
-        let (_, repo) = self.load_workspace_and_repo()?;
-        let current = self.current_revision()?;
-        let current_commit = self.resolve_revision_to_commit(&repo, &current)?;
-        let current_is_disposable =
-            import::is_disposable_sync_placeholder(repo.as_ref(), &current_commit)?;
-
-        match current_import {
-            None => Ok(ResumeState::Fresh),
-            Some(current_import) => {
-                let import_commit = self.resolve_revision_to_commit(&repo, current_import)?;
-                let current_import_has_conflicts = self.has_conflicts(current_import)?;
-                let current_import_is_descendant_of_base =
-                    self.is_ancestor(base, current_import)?;
-                Ok(resume_state_for_commits(
-                    base,
-                    &current,
-                    &current_commit,
-                    current_import,
-                    &import_commit,
-                    current_import_has_conflicts,
-                    current_import_is_descendant_of_base,
-                    current_is_disposable,
-                ))
-            }
-        }
-    }
-
-    pub(crate) fn has_conflicts(&self, rev: &Revision) -> Result<bool> {
-        let (_, repo) = self.load_workspace_and_repo()?;
-        let commit = self.resolve_revision_to_commit(&repo, rev)?;
-        Ok(commit.has_conflict())
-    }
-
-    pub(crate) fn bookmark_summary(&self, name: &str) -> Result<BookmarkSummary> {
-        let (_, repo) = self.load_workspace_and_repo()?;
-        let target = repo.view().get_local_bookmark(name.as_ref());
-        match target.as_resolved() {
-            Some(Some(commit_id)) => Ok(BookmarkSummary {
-                name: name.to_string(),
-                revision: Some(self.revision(name, commit_id)),
-                exists: true,
-            }),
-            Some(None) => Ok(BookmarkSummary::missing(name)),
-            None => Err(anyhow!("local bookmark `{name}` is conflicted")),
-        }
-    }
-
-    pub(crate) fn is_ancestor(
-        &self,
-        ancestor: &Revision,
-        descendant: &Revision,
-    ) -> Result<bool> {
-        let (_, repo) = self.load_workspace_and_repo()?;
-        let ancestor_commit = self.resolve_revision_to_commit(&repo, ancestor)?;
-        let descendant_commit = self.resolve_revision_to_commit(&repo, descendant)?;
-        repo.index()
-            .is_ancestor(ancestor_commit.id(), descendant_commit.id())
-            .context("failed to query jj ancestry")
-    }
-
-    pub(crate) fn is_working_copy_clean(&self) -> Result<bool> {
-        let (workspace, repo) = self.load_workspace_and_repo()?;
-        let current = self.resolve_commit_by_revset(&workspace, &repo, "@")?;
-        is_working_copy_clean_with_snapshot(&self.settings, &self.workspace_root, &current.tree())
-    }
-
     fn load_workspace_and_repo(&self) -> Result<(Workspace, Arc<ReadonlyRepo>)> {
         let workspace = Workspace::load(
             &self.settings,
@@ -233,75 +113,6 @@ impl JjClient {
         Ok((workspace, repo))
     }
 
-    fn resolve_revision_to_commit(
-        &self,
-        repo: &Arc<ReadonlyRepo>,
-        rev: &Revision,
-    ) -> Result<Commit> {
-        repo.store()
-            .get_commit(rev.id())
-            .with_context(|| format!("failed to load commit `{}`", rev.id().hex()))
-    }
-
-    fn resolve_commit_by_revset(
-        &self,
-        workspace: &Workspace,
-        repo: &Arc<ReadonlyRepo>,
-        revset: &str,
-    ) -> Result<Commit> {
-        let extensions = RevsetExtensions::default();
-        let expression = self.parse_revset(revset, workspace, &extensions)?;
-        let symbol_resolver = SymbolResolver::new(repo.as_ref(), extensions.symbol_resolvers());
-        let resolved = expression
-            .resolve_user_expression(repo.as_ref(), &symbol_resolver)
-            .with_context(|| format!("failed to resolve revset `{revset}`"))?;
-        let evaluated = resolved
-            .evaluate(repo.as_ref())
-            .with_context(|| format!("failed to evaluate revset `{revset}`"))?;
-        let mut commits = evaluated.commit_change_ids();
-        let first = commits
-            .next()
-            .transpose()?
-            .ok_or_else(|| anyhow!("`{revset}` resolved to no revisions"))?;
-        if commits.next().transpose()?.is_some() {
-            return Err(anyhow!("`{revset}` resolved to more than one revision"));
-        }
-        repo.store()
-            .get_commit(&first.0)
-            .with_context(|| format!("failed to load commit for revset `{revset}`"))
-    }
-
-    fn parse_revset(
-        &self,
-        revset: &str,
-        workspace: &Workspace,
-        extensions: &RevsetExtensions,
-    ) -> Result<Arc<UserRevsetExpression>> {
-        let mut diagnostics = RevsetDiagnostics::new();
-        let aliases = RevsetAliasesMap::new();
-        let fileset_aliases = FilesetAliasesMap::new();
-        let ui = RepoPathUiConverter::Fs {
-            cwd: self.workspace_root.clone(),
-            base: self.workspace_root.clone(),
-        };
-        let context = RevsetParseContext {
-            aliases_map: &aliases,
-            local_variables: HashMap::new(),
-            user_email: self.settings.user_email(),
-            date_pattern_context: DatePatternContext::from(Local::now().fixed_offset()),
-            default_ignored_remote: None,
-            fileset_aliases_map: &fileset_aliases,
-            use_glob_by_default: true,
-            extensions,
-            workspace: Some(RevsetWorkspaceContext {
-                path_converter: &ui,
-                workspace_name: workspace.workspace_name(),
-            }),
-        };
-        parse(&mut diagnostics, revset, &context)
-            .with_context(|| format!("failed to parse revset `{revset}`"))
-    }
-
     fn parse_repo_path(&self, path: &Path) -> Result<RepoPathBuf> {
         RepoPathBuf::parse_fs_path(&self.workspace_root, &self.workspace_root, path).map_err(
             |err| {
@@ -313,63 +124,6 @@ impl JjClient {
         )
     }
 
-    fn read_entry_from_tree(
-        &self,
-        repo: &ReadonlyRepo,
-        tree: &jj_lib::merged_tree::MergedTree,
-        repo_path: &RepoPath,
-        display_path: &Path,
-    ) -> Result<Option<ManagedEntry>> {
-        let value = tree.path_value(repo_path).block_on().with_context(|| {
-            format!("failed to load tree value for `{}`", display_path.display())
-        })?;
-        let materialized =
-            materialize_tree_value(repo.store(), repo_path, value, tree.labels()).block_on()?;
-
-        match materialized {
-            MaterializedTreeValue::Absent => Ok(None),
-            MaterializedTreeValue::File(mut file) => Ok(Some(ManagedEntry::File {
-                contents: file.read_all(repo_path).block_on().with_context(|| {
-                    format!(
-                        "failed to read file content for `{}`",
-                        display_path.display()
-                    )
-                })?,
-                executable: file.executable,
-            })),
-            MaterializedTreeValue::Symlink { target, .. } => Ok(Some(ManagedEntry::Symlink {
-                target: PathBuf::from(target),
-            })),
-            MaterializedTreeValue::FileConflict(file) => {
-                let _ = materialize_merge_result_to_bytes(
-                    &file.contents,
-                    &file.labels,
-                    &ConflictMaterializeOptions {
-                        marker_style: ConflictMarkerStyle::Diff,
-                        marker_len: None,
-                        merge: MergeOptions {
-                            hunk_level: FileMergeHunkLevel::Line,
-                            same_change: SameChange::Accept,
-                        },
-                    },
-                );
-                Ok(Some(ManagedEntry::Conflict))
-            }
-            MaterializedTreeValue::OtherConflict { .. } => Ok(Some(ManagedEntry::Conflict)),
-            MaterializedTreeValue::Tree(_) => Ok(Some(ManagedEntry::Unsupported {
-                kind: "directory".to_string(),
-            })),
-            MaterializedTreeValue::GitSubmodule(_) => Ok(Some(ManagedEntry::Unsupported {
-                kind: "git submodule".to_string(),
-            })),
-            MaterializedTreeValue::AccessDenied(err) => Err(anyhow!(err))
-                .with_context(|| format!("access denied reading `{}`", display_path.display())),
-        }
-    }
-
-    fn revision(&self, expression: impl Into<String>, commit_id: &CommitId) -> Revision {
-        Revision::new(commit_id.clone(), expression)
-    }
 }
 
 fn resume_state_for_commits(
