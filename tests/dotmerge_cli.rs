@@ -236,6 +236,7 @@ fn sync_recovers_from_interrupted_import_after_resume_state_validation() {
         .arg(sandbox.repo());
     initial_sync.assert().success();
 
+    // Drift $HOME, then prepare a merge without exporting (sets current-import).
     write_file(&sandbox.home().join("managed/foo"), "home-2\n");
 
     let mut prepare_sync = Command::cargo_bin("dotmerge").unwrap();
@@ -248,6 +249,15 @@ fn sync_recovers_from_interrupted_import_after_resume_state_validation() {
         .arg("--repo")
         .arg(sandbox.repo());
     prepare_sync.assert().success();
+
+    // Advance origin/main to add managed/bar — a file absent from $HOME.
+    // The next full sync must write bar to $HOME, so the export will be
+    // attempted.  We restore `@` to current-import afterward so that the
+    // interrupted sync sees a clean, Resumable working-copy state.
+    sandbox.run_jj(&["new", "origin/main", "-m", "add bar"]);
+    write_file(&sandbox.repo().join("managed/bar"), "bar\n");
+    sandbox.run_jj(&["bookmark", "move", "origin/main", "--to", "@"]);
+    sandbox.run_jj(&["edit", "current-import"]);
 
     let managed_dir = sandbox.home().join("managed");
     let original_mode = fs::metadata(&managed_dir).unwrap().permissions().mode();
@@ -386,6 +396,7 @@ fn sync_export_failure_leaves_last_sync_and_current_import_unchanged() {
         .arg(sandbox.repo());
     initial_sync.assert().success();
 
+    // Drift $HOME, then prepare a merge without exporting (sets current-import).
     write_file(&sandbox.home().join("managed/foo"), "home-2\n");
 
     let mut prepare_sync = Command::cargo_bin("dotmerge").unwrap();
@@ -398,6 +409,15 @@ fn sync_export_failure_leaves_last_sync_and_current_import_unchanged() {
         .arg("--repo")
         .arg(sandbox.repo());
     prepare_sync.assert().success();
+
+    // Advance origin/main to add managed/bar — a file absent from $HOME.
+    // The next full sync must write bar to $HOME, so the export will be
+    // attempted.  We restore `@` to current-import afterward so that the
+    // failing sync sees a clean, Resumable working-copy state.
+    sandbox.run_jj(&["new", "origin/main", "-m", "add bar"]);
+    write_file(&sandbox.repo().join("managed/bar"), "bar\n");
+    sandbox.run_jj(&["bookmark", "move", "origin/main", "--to", "@"]);
+    sandbox.run_jj(&["edit", "current-import"]);
 
     let last_sync_before = sandbox
         .jj_stdout(&["log", "-r", "last-sync", "--no-graph", "-T", "commit_id"])

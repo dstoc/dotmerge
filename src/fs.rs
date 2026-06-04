@@ -1,4 +1,4 @@
-use crate::model::{AddSourceKind, ManagedEntry, ValidatedAddSource};
+use crate::model::{AddSourceKind, FileChangeKind, FileStatusSummary, ManagedEntry, ValidatedAddSource};
 use anyhow::{anyhow, Context, Result};
 use std::ffi::OsString;
 use std::fs;
@@ -190,10 +190,37 @@ pub fn read_rooted_entry(root: &Path, repo_relative: &Path) -> Result<Option<Man
 pub fn export_home_entries(
     home: &Path,
     entries: &[(PathBuf, ManagedEntry)],
-) -> Result<Vec<PathBuf>> {
-    let mut exported = Vec::with_capacity(entries.len());
+) -> Result<Vec<FileStatusSummary>> {
+    let mut exported = Vec::new();
 
     for (repo_relative, entry) in entries {
+        match entry {
+            ManagedEntry::Conflict => {
+                return Err(anyhow!(
+                    "refusing to export unresolved conflict at `{}`",
+                    repo_relative.display()
+                ));
+            }
+            ManagedEntry::Unsupported { kind } => {
+                return Err(anyhow!(
+                    "refusing to export unsupported `{kind}` entry at `{}`",
+                    repo_relative.display()
+                ));
+            }
+            _ => {}
+        }
+
+        let existing = read_rooted_entry(home, repo_relative)?;
+        if existing.as_ref() == Some(entry) {
+            continue;
+        }
+
+        let change_kind = if existing.is_none() {
+            FileChangeKind::Added
+        } else {
+            FileChangeKind::Modified
+        };
+
         let destination = home.join(repo_relative);
         let parent = destination.parent().ok_or_else(|| {
             anyhow!(
@@ -210,21 +237,11 @@ pub fn export_home_entries(
                 executable,
             } => write_atomic_file(&destination, contents, *executable)?,
             ManagedEntry::Symlink { target } => write_atomic_symlink(&destination, target)?,
-            ManagedEntry::Conflict => {
-                return Err(anyhow!(
-                    "refusing to export unresolved conflict at `{}`",
-                    repo_relative.display()
-                ));
-            }
-            ManagedEntry::Unsupported { kind } => {
-                return Err(anyhow!(
-                    "refusing to export unsupported `{kind}` entry at `{}`",
-                    repo_relative.display()
-                ));
-            }
+            // Conflict and Unsupported are already handled above.
+            ManagedEntry::Conflict | ManagedEntry::Unsupported { .. } => unreachable!(),
         }
 
-        exported.push(repo_relative.clone());
+        exported.push(FileStatusSummary::new(repo_relative.clone(), change_kind));
     }
 
     Ok(exported)
