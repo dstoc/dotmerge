@@ -283,6 +283,22 @@ impl JjClient {
             .block_on()
             .context("failed to materialize imported tree")?;
 
+        let current_tree_id = current_commit
+            .tree_ids()
+            .as_resolved()
+            .cloned()
+            .ok_or_else(|| anyhow!("current `@` revision must have a resolved tree"))?;
+
+        if imported_tree_id == current_tree_id {
+            if current_import.exists {
+                let mut tx = repo.start_transaction();
+                tx.repo_mut()
+                    .set_local_bookmark_target("current-import".as_ref(), RefTarget::absent());
+                tx.commit("abandon empty current-import").block_on()?;
+            }
+            return Ok(self.revision_summary("@", current_commit.id()));
+        }
+
         let imported_tree =
             jj_lib::merged_tree::MergedTree::resolved(repo.store().clone(), imported_tree_id);
         let mut tx = repo.start_transaction();

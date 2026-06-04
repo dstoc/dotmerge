@@ -193,13 +193,15 @@ The import phase should:
 - compare managed paths in `$HOME` against `last-sync`
 - detect additions, modifications, and deletions
 - materialize those home changes as a jj working-copy change or commit on top of `last-sync`
-- move `current-import` to that imported revision
+- move `current-import` to that imported revision when the imported tree differs from the current repo-side state
 
 If there are no home changes, import is a no-op.
 
 If `last-sync` does not exist yet, import should compare `$HOME` against the empty tree and materialize a home snapshot revision.
 
 If `current-import` already exists from a previous interrupted sync, rerunning `dotmerge sync` should first normalize it so that `current-import` is a direct child of the current repo-side state, then refresh that imported revision from the current managed `$HOME` state.
+
+If the refreshed import would be tree-identical to the current repo-side state, `dotmerge` should abandon `current-import` instead of keeping an empty or redundant import commit.
 
 `current-import` represents imported home state, not a fixed target choice, so it may be reused even if the user reruns `dotmerge sync` with a different `--target`.
 
@@ -400,7 +402,7 @@ It should hard error if `--target` does not resolve to exactly one revision.
 
 It should:
 
-- create or refresh `current-import`
+- create or refresh `current-import` when import produces a distinct imported state
 - perform the merge against the requested target
 - leave any resulting conflict state in the repo for the user to resolve
 - leave the prepared sync state in place for a later full `dotmerge sync`
@@ -432,18 +434,19 @@ Suggested behavior:
 3. Normalize `current-import` so it is a direct child of the current clean repo-side `@` revision.
    - if the existing bookmark is already there, it may be rewritten in place
    - otherwise, replace it with a fresh import commit at that position
-4. Compute managed paths from the parent of `current-import`.
+4. Compute managed paths from the repo-side parent state.
    - if the requested target is already an ancestor of that repo-side parent, use only the parent tree's paths
    - otherwise, use the union of that parent tree's paths and the target tree's paths
 5. Refresh `current-import` from the current managed home state on top of `last-sync`.
    - `current-import` should remain an imported home snapshot, not absorb repo-side commits that were already above an older import
-6. Merge `current-import` with the target revision.
-   - if the target revision is already an ancestor of the prepared imported state, reuse that prepared state directly instead of creating a merge commit
-7. If merge conflicts exist, stop and report them, leaving `current-import` in place.
+   - if that refreshed import would be tree-identical to the repo-side parent state, abandon `current-import` and reuse the repo-side state directly
+6. Merge the prepared import state with the target revision.
+   - if the target revision is already an ancestor of the prepared state, reuse that prepared state directly instead of creating a merge commit
+7. If merge conflicts exist, stop and report them, leaving any non-redundant `current-import` in place.
 8. If the user later resolves those conflicts in jj and reruns `dotmerge sync`, `dotmerge` should normalize and refresh `current-import` again from the latest managed home state and recompute the merge.
 9. If the merge result is clean, export it to `$HOME`.
 10. Only after successful export, move `last-sync` to the exported revision.
-11. Clear `current-import`.
+11. Clear `current-import` if it still exists.
 
 After a successful sync, leave the repo working copy at the final merged/exported revision.
 

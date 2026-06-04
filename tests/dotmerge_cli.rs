@@ -108,6 +108,7 @@ fn sync_no_export_on_fresh_empty_repo_does_not_record_last_sync() {
     cmd.assert().success();
 
     assert_bookmark_absent(sandbox.home(), sandbox.repo(), "last-sync");
+    assert_bookmark_absent(sandbox.home(), sandbox.repo(), "current-import");
 }
 
 #[test]
@@ -203,8 +204,8 @@ fn sync_reuses_import_without_merge_when_target_is_ancestor() {
         .trim()
         .to_owned();
     assert_eq!(
-        last_sync_description, "dotmerge import from home",
-        "expected sync to reuse the prepared import instead of creating a merge commit"
+        last_sync_description, "adding foo",
+        "expected sync to reuse the existing repo-side state instead of creating a redundant import commit"
     );
 
     let last_sync_parents = sandbox.jj_stdout(&[
@@ -314,35 +315,15 @@ fn sync_rerun_moves_current_import_after_repo_side_state_before_refresh() {
         .arg(sandbox.repo());
     rerun_sync.assert().success();
 
-    let current_import = sandbox
-        .jj_stdout(&[
-            "log",
-            "-r",
-            "current-import",
-            "--no-graph",
-            "-T",
-            "commit_id",
-        ])
+    assert_bookmark_absent(sandbox.home(), sandbox.repo(), "current-import");
+
+    let current_after_rerun = sandbox
+        .jj_stdout(&["log", "-r", "@", "--no-graph", "-T", "commit_id"])
         .trim()
         .to_owned();
     assert!(
-        !current_import.is_empty(),
-        "expected `current-import` to exist after `sync --no-export`"
-    );
-
-    let ancestry = sandbox.jj_stdout(&[
-        "log",
-        "-r",
-        &format!("{repo_side_before_rerun}::current-import"),
-        "--no-graph",
-        "-T",
-        "commit_id ++ \"\\n\"",
-    ]);
-    assert!(
-        ancestry
-            .lines()
-            .any(|line| line.trim() == repo_side_before_rerun),
-        "expected rerun sync to recreate `current-import` after the repo-side state; ancestry was:\n{ancestry}"
+        current_after_rerun == repo_side_before_rerun,
+        "expected rerun sync to reuse the repo-side state unchanged when the import is redundant"
     );
 }
 

@@ -30,7 +30,10 @@ pub fn run(args: SyncArgs) -> Result<()> {
     let managed_paths = status::managed_paths(&client, &target)?;
     let imported = client.create_or_refresh_import(&base, &home, &managed_paths)?;
     let merged = client.merge_revisions(&imported, &target)?;
-    client.checkout_revision(&merged)?;
+    let current = client.current_revision()?;
+    if !merged.same_revision(&current) {
+        client.checkout_revision(&merged)?;
+    }
 
     if client.has_conflicts(&merged)? {
         return Err(anyhow!(
