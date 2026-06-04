@@ -43,7 +43,7 @@ pub(crate) fn merge_description_for_target(
     ))
 }
 
-fn target_label(session: &JjSession, target: &Revision) -> Result<String> {
+pub(crate) fn target_label(session: &JjSession, target: &Revision) -> Result<String> {
     let commit = session.resolve_revision_to_commit(target)?;
     let mut names = Vec::new();
     for (name, _) in session

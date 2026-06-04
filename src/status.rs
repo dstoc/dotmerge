@@ -402,7 +402,7 @@ fn print_changes(title: &str, changes: &[FileStatusSummary]) {
     }
 }
 
-fn kind_label(kind: &FileChangeKind) -> &'static str {
+pub(crate) fn kind_label(kind: &FileChangeKind) -> &'static str {
     match kind {
         FileChangeKind::Added => "added",
         FileChangeKind::Modified => "modified",
