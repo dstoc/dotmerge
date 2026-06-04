@@ -9,6 +9,8 @@ chrono = "0.4.44"
 clap = { version = "4.6.1", features = ["derive"] }
 jj-lib = "0.41.0"
 pollster = "0.4.0"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [dev-dependencies]
 assert_cmd = "=2.2.2"

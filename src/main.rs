@@ -2,6 +2,7 @@
 
 mod add;
 mod cli;
+mod config;
 mod fs;
 mod export;
 mod import;
