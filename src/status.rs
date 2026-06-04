@@ -2,7 +2,8 @@ use crate::cli::StatusArgs;
 use crate::fs;
 use crate::jj::{JjClient, JjSession};
 use crate::model::{
-    FileChangeKind, FileStatusSummary, ManagedEntry, ResumeState, Revision, SyncStatusSummary,
+    FileChangeKind, FileStatusSummary, ManagedEntry, ResumeState, Revision, SyncState,
+    SyncStatusSummary,
 };
 use crate::util;
 use anyhow::Result;
@@ -79,6 +80,7 @@ fn collect_with_repo_clean(
         target.to_summary(),
         repo_path.to_path_buf(),
     );
+    summary.last_sync_present = last_sync.exists;
     let target_already_applied = source.is_ancestor(&target, &current)?;
     summary.target_already_applied = target_already_applied;
     let managed_paths = managed_paths(source, &target)?;
@@ -89,11 +91,6 @@ fn collect_with_repo_clean(
         Some(repo_clean) => repo_clean,
         None => is_working_copy_clean(source, repo_path)?,
     });
-    if !last_sync.exists {
-        summary
-            .notes
-            .push("`last-sync` is missing; sync will use the empty tree as base.".to_string());
-    }
 
     for path in &managed_paths {
         let home_entry = fs::read_rooted_entry(home, path)?;
@@ -129,11 +126,6 @@ fn collect_with_repo_clean(
     summary.target_differs_from_base =
         !target_already_applied && !summary.target_changes.is_empty();
 
-    if let Some(note) =
-        current_import_note(&resume_state, &current, current_import.revision.as_ref())
-    {
-        summary.notes.push(note);
-    }
     if let Some(import_revision) = current_import.revision.as_ref() {
         if matches!(resume_state, ResumeState::Resumable) && !current.same(import_revision) {
             summary.prepared = Some(current.to_summary());
@@ -156,118 +148,119 @@ fn collect_with_repo_clean(
             .notes
             .push("deletion candidates are present; MVP sync will only report them, not remove files from `$HOME`.".to_string());
     }
-    if matches!(resume_state, ResumeState::Blocked { .. }) {
-        summary
-            .next_actions
-            .push("repair `current-import` until it satisfies the resume preconditions, then rerun `dotmerge sync`".to_string());
-    } else if summary.repo_clean != Some(true) {
-        summary
-            .next_actions
-            .push("repair the repo state until the working copy is clean".to_string());
+
+    // Derive the single SyncState (priority order: first match wins).
+    summary.state = if summary.repo_clean == Some(false) {
+        SyncState::RepoDirty
+    } else if matches!(resume_state, ResumeState::Blocked { .. }) {
+        SyncState::Blocked
     } else if summary.has_conflicts {
-        summary
-            .next_actions
-            .push("resolve the jj conflicts at `@`, then rerun `dotmerge sync`".to_string());
-    } else if !summary.home_differs_from_base
-        && !summary.target_differs_from_base
-        && summary.current_import.revision.is_none()
+        SyncState::Conflict
+    } else if summary.current_import.revision.is_some()
+        && matches!(resume_state, ResumeState::Resumable)
     {
-        summary
-            .next_actions
-            .push("sync would leave the repo and `$HOME` unchanged".to_string());
+        SyncState::MergePrepared
+    } else if summary.home_differs_from_base
+        && summary.target_differs_from_base
+        && !summary.target_already_applied
+    {
+        SyncState::Diverged
+    } else if summary.target_differs_from_base && !summary.target_already_applied {
+        SyncState::Incoming
+    } else if summary.home_differs_from_base {
+        SyncState::LocalChanges
     } else {
-        summary
-            .next_actions
-            .push("refresh `current-import` from the current managed `$HOME` state".to_string());
-        summary
-            .next_actions
-            .push("merge the imported state with the requested target revision".to_string());
-        summary.next_actions.push(
-            "export the merged files back to `$HOME` without deleting deletion candidates"
-                .to_string(),
-        );
-    }
+        SyncState::UpToDate
+    };
+
+    // Lift resume_state onto the summary for use by the renderer.
+    summary.resume_state = resume_state;
 
     Ok(summary)
 }
 
-fn current_import_note(
-    resume_state: &ResumeState,
-    current: &Revision,
-    current_import: Option<&Revision>,
-) -> Option<String> {
-    match resume_state {
-        ResumeState::Fresh => Some("`current-import` is missing; sync will start fresh.".to_string()),
-        ResumeState::Resumable => current_import.map(|import_revision| {
-            if current.same(import_revision) {
-                "`current-import` already matches `@` and will be refreshed on sync.".to_string()
-            } else {
-                "sync will replace `current-import` with a direct child of the current repo-side `@` state before refreshing it.".to_string()
-            }
-        }),
-        ResumeState::Blocked { reason } => Some(reason.clone()),
-    }
-}
-
 pub fn print_summary(summary: &SyncStatusSummary) {
-    println!("base:   last-sync = {}", summary.base.short_id());
-    match &summary.current_import.revision {
-        Some(revision) => println!("import: current-import = {}", revision.short_id()),
-        None => println!("import: current-import = missing"),
-    }
-    if let Some(prepared) = &summary.prepared {
-        let suffix = if summary.has_conflicts {
-            " (prepared, conflicts)"
-        } else {
-            " (prepared)"
-        };
-        println!("merge:  @ = {}{}", prepared.short_id(), suffix);
-    }
-    println!(
-        "target: {} = {}",
-        summary.target.expression,
-        summary.target.short_id()
-    );
-    println!("repo:   {}", summary.repo_path.display());
+    // --- State headline ---
+    let (state_name, state_desc) = state_headline(&summary.state, summary);
+    println!("state:   {state_name} — {state_desc}");
     println!();
 
+    // --- Facts block ---
+    let base_id = if summary.last_sync_present {
+        summary.base.short_id()
+    } else {
+        "none".to_string()
+    };
+    println!("base:    last-sync     {base_id}");
+
+    // target line
+    let target_suffix = if summary.target_already_applied {
+        "  (already applied)".to_string()
+    } else if summary.target_differs_from_base {
+        format!("  ({} ahead)", plural_changes(summary.target_changes.len()))
+    } else {
+        String::new()
+    };
     println!(
-        "home:   {}",
-        describe_relation(
-            summary.home_differs_from_base,
-            summary.home_changes.len(),
-            "change"
-        )
+        "target:  {}   {}{}",
+        summary.target.expression,
+        summary.target.short_id(),
+        target_suffix
     );
-    print_changes("home changes since base", &summary.home_changes);
-    if summary.target_already_applied {
-        println!("target: already applied");
-    } else {
-        println!(
-            "target: {}",
-            describe_relation(
-                summary.target_differs_from_base,
-                summary.target_changes.len(),
-                "change"
-            )
-        );
-        print_changes("target changes since base", &summary.target_changes);
+
+    // import line
+    match &summary.current_import.revision {
+        None => println!("import:  none"),
+        Some(revision) => {
+            let at_suffix = if matches!(summary.state, SyncState::MergePrepared) {
+                "  (prepared at @)"
+            } else {
+                ""
+            };
+            println!(
+                "import:  current-import {}{}",
+                revision.short_id(),
+                at_suffix
+            );
+        }
     }
 
-    if summary.deletion_candidates.is_empty() {
-        println!("deletions: none");
-    } else {
-        println!(
-            "deletions: {}",
-            summary
-                .deletion_candidates
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+    // @ line — only for MergePrepared
+    if matches!(summary.state, SyncState::MergePrepared) {
+        if let Some(prepared) = &summary.prepared {
+            println!(
+                "@:       {}   (merge of import + target)",
+                prepared.short_id()
+            );
+        }
     }
 
+    // repo line
+    let repo_clean_label = match summary.repo_clean {
+        Some(true) => "  (clean)",
+        Some(false) => "  (dirty)",
+        None => "",
+    };
+    println!(
+        "repo:    {}{}",
+        summary.repo_path.display(),
+        repo_clean_label
+    );
+
+    // --- Change lists ---
+    if !summary.target_changes.is_empty() && !summary.target_already_applied {
+        println!();
+        print_changes(
+            "incoming changes (target since base)",
+            &summary.target_changes,
+        );
+    }
+    if !summary.home_changes.is_empty() {
+        println!();
+        print_changes("local changes ($HOME since base)", &summary.home_changes);
+    }
+
+    // --- Notes ---
     if !summary.notes.is_empty() {
         println!();
         println!("notes:");
@@ -276,11 +269,90 @@ pub fn print_summary(summary: &SyncStatusSummary) {
         }
     }
 
-    if !summary.next_actions.is_empty() {
-        println!();
-        println!("next:");
-        for action in &summary.next_actions {
-            println!("  - {action}");
+    // --- sync will: line ---
+    println!();
+    let sync_will = sync_will_line(&summary.state, &summary.resume_state);
+    println!("sync will:  {sync_will}");
+}
+
+fn state_headline(state: &SyncState, summary: &SyncStatusSummary) -> (String, String) {
+    match state {
+        SyncState::UpToDate => (
+            "up to date".to_string(),
+            "$HOME, repo, and target already agree".to_string(),
+        ),
+        SyncState::LocalChanges => (
+            "local changes".to_string(),
+            format!(
+                "$HOME is {} ahead of last-sync",
+                plural_changes(summary.home_changes.len())
+            ),
+        ),
+        SyncState::Incoming => (
+            "incoming".to_string(),
+            format!(
+                "target is {} ahead of last-sync",
+                plural_changes(summary.target_changes.len())
+            ),
+        ),
+        SyncState::Diverged => (
+            "diverged".to_string(),
+            format!(
+                "$HOME is {} ahead and target is {} ahead of last-sync",
+                plural_changes(summary.home_changes.len()),
+                plural_changes(summary.target_changes.len())
+            ),
+        ),
+        SyncState::MergePrepared => (
+            "merge prepared".to_string(),
+            "not yet exported".to_string(),
+        ),
+        SyncState::Conflict => (
+            "conflict".to_string(),
+            "jj conflicts at @ must be resolved before export".to_string(),
+        ),
+        SyncState::Blocked => (
+            "blocked".to_string(),
+            "current-import is not in a valid resume position".to_string(),
+        ),
+        SyncState::RepoDirty => (
+            "repo dirty".to_string(),
+            "repo working copy has uncommitted changes".to_string(),
+        ),
+    }
+}
+
+fn sync_will_line(state: &SyncState, resume_state: &ResumeState) -> String {
+    match state {
+        SyncState::UpToDate => {
+            "nothing — $HOME, repo, and target already agree".to_string()
+        }
+        SyncState::LocalChanges => {
+            "import the local $HOME changes and advance last-sync".to_string()
+        }
+        SyncState::Incoming => {
+            "merge target into the imported $HOME state, then export".to_string()
+        }
+        SyncState::Diverged => {
+            "import the local changes, merge target, then export".to_string()
+        }
+        SyncState::MergePrepared => {
+            "export the prepared merge to $HOME and advance last-sync".to_string()
+        }
+        SyncState::Conflict => {
+            "resolve the jj conflicts at `@` in the repo, then rerun dotmerge sync".to_string()
+        }
+        SyncState::Blocked => {
+            if let ResumeState::Blocked { reason } = resume_state {
+                format!(
+                    "repair `current-import` until it satisfies the resume preconditions, then rerun `dotmerge sync` (reason: {reason})"
+                )
+            } else {
+                "repair `current-import` until it satisfies the resume preconditions, then rerun `dotmerge sync`".to_string()
+            }
+        }
+        SyncState::RepoDirty => {
+            "clean the repo working copy, then rerun dotmerge sync".to_string()
         }
     }
 }
@@ -373,14 +445,11 @@ pub(crate) fn classify_change(base: Option<&ManagedEntry>, other: Option<&Manage
     }
 }
 
-fn describe_relation(differs: bool, count: usize, label: &str) -> String {
-    if differs {
-        format!(
-            "differs from base ({count} {label}{})",
-            if count == 1 { "" } else { "s" }
-        )
+fn plural_changes(count: usize) -> String {
+    if count == 1 {
+        "1 change".to_string()
     } else {
-        "matches base".to_string()
+        format!("{count} changes")
     }
 }
 

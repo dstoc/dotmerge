@@ -84,6 +84,18 @@ pub(crate) enum ResumeState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SyncState {
+    UpToDate,
+    LocalChanges,
+    Incoming,
+    Diverged,
+    MergePrepared,
+    Conflict,
+    Blocked,
+    RepoDirty,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ManagedEntry {
     File { contents: Vec<u8>, executable: bool },
     Symlink { target: PathBuf },
@@ -133,7 +145,9 @@ pub(crate) struct SyncStatusSummary {
     pub(crate) target_changes: Vec<FileStatusSummary>,
     pub(crate) deletion_candidates: Vec<PathBuf>,
     pub(crate) notes: Vec<String>,
-    pub(crate) next_actions: Vec<String>,
+    pub(crate) last_sync_present: bool,
+    pub(crate) resume_state: ResumeState,
+    pub(crate) state: SyncState,
 }
 
 impl SyncStatusSummary {
@@ -158,7 +172,9 @@ impl SyncStatusSummary {
             target_changes: Vec::new(),
             deletion_candidates: Vec::new(),
             notes: Vec::new(),
-            next_actions: Vec::new(),
+            last_sync_present: false,
+            resume_state: ResumeState::Fresh,
+            state: SyncState::UpToDate,
         }
     }
 }

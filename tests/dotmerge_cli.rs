@@ -62,12 +62,10 @@ fn status_on_initial_repo_reports_missing_last_sync_state() {
         .arg(sandbox.repo());
 
     cmd.assert().success().stdout(
-        predicate::str::contains("import: current-import = missing")
+        predicate::str::contains("import:  none")
+            .and(predicate::str::contains("state:   up to date"))
             .and(predicate::str::contains(
-                "`last-sync` is missing; sync will use the empty tree as base.",
-            ))
-            .and(predicate::str::contains(
-                "sync would leave the repo and `$HOME` unchanged",
+                "sync will:  nothing — $HOME, repo, and target already agree",
             ))
             .and(predicate::str::contains("repo working copy is not clean").not()),
     );
@@ -109,8 +107,8 @@ fn status_reports_target_already_applied_without_target_diff_details() {
         .arg(sandbox.repo());
 
     status.assert().success().stdout(
-        predicate::str::contains("target: already applied")
-            .and(predicate::str::contains("target changes since base").not())
+        predicate::str::contains("(already applied)")
+            .and(predicate::str::contains("incoming changes (target since base)").not())
             .and(predicate::str::contains("  - deleted  foo").not()),
     );
 }
@@ -288,10 +286,11 @@ fn sync_recovers_from_interrupted_import_after_resume_state_validation() {
         .arg("--repo")
         .arg(sandbox.repo());
     status.assert().success().stdout(
-        predicate::str::contains("`current-import`")
-            .and(predicate::str::contains("will be refreshed on sync").or(predicate::str::contains(
-                "before refreshing it.",
-            ))),
+        predicate::str::contains("state:   merge prepared")
+            .and(predicate::str::contains("import:  current-import"))
+            .and(predicate::str::contains(
+                "sync will:  export the prepared merge to $HOME and advance last-sync",
+            )),
     );
 
     let mut rerun_sync = Command::cargo_bin("dotmerge").unwrap();
