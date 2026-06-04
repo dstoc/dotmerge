@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
-use jj_lib::config::StackedConfig;
+use jj_lib::config::{ConfigLayer, ConfigSource, StackedConfig};
 use jj_lib::conflicts::{
     materialize_merge_result_to_bytes, materialize_tree_value, ConflictMarkerStyle,
     ConflictMaterializeOptions, MaterializedTreeValue,
@@ -51,8 +51,7 @@ pub(crate) struct JjSession {
 impl JjClient {
     pub(crate) fn open(repo_path: impl Into<PathBuf>) -> Result<Self> {
         let workspace_root = find_workspace_root(repo_path.into())?;
-        let settings = UserSettings::from_config(StackedConfig::with_defaults())
-            .context("failed to construct default jj settings")?;
+        let settings = load_settings(&workspace_root)?;
         Ok(Self {
             workspace_root,
             settings,
@@ -523,6 +522,67 @@ impl JjSession {
     fn revision(&self, expression: impl Into<String>, commit_id: &CommitId) -> Revision {
         Revision::new(commit_id.clone(), expression)
     }
+}
+
+/// Build jj settings whose author identity matches what `jj` itself would use
+/// for a commit in this repo.
+///
+/// jj-lib only exposes config primitives, not the discovery of where jj keeps
+/// its user/repo config (`JJ_CONFIG`, `~/.config/jj`, the per-repo config under
+/// `~/.config/jj/repos/<hash>`, env overrides). Rather than reimplement that —
+/// and risk diverging from jj — we ask jj for the resolved values and layer
+/// them over the defaults.
+fn load_settings(workspace_root: &Path) -> Result<UserSettings> {
+    let name = jj_config_get(workspace_root, "user.name")?;
+    let email = jj_config_get(workspace_root, "user.email")?;
+
+    let mut config = StackedConfig::with_defaults();
+    let mut layer = ConfigLayer::empty(ConfigSource::User);
+    layer
+        .set_value(["user", "name"], name)
+        .context("failed to set user.name in jj settings")?;
+    layer
+        .set_value(["user", "email"], email)
+        .context("failed to set user.email in jj settings")?;
+    config.add_layer(layer);
+
+    UserSettings::from_config(config).context("failed to construct jj settings")
+}
+
+/// Read a single config value via `jj config get`, run in `workspace_root` so
+/// repo-scoped config and env overrides resolve exactly as they do for `jj`.
+///
+/// Errors if the `jj` binary is unavailable or the key is unset, rather than
+/// silently authoring commits with an empty identity.
+fn jj_config_get(workspace_root: &Path, key: &str) -> Result<String> {
+    let output = std::process::Command::new("jj")
+        .args(["config", "get", key])
+        .current_dir(workspace_root)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run `jj config get {key}`; is the `jj` binary installed and on PATH?"
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "`jj config get {key}` failed: {}\n\nset it with `jj config set --user {key} \"...\"`",
+            stderr.trim()
+        ));
+    }
+
+    let value = String::from_utf8(output.stdout)
+        .with_context(|| format!("`jj config get {key}` returned non-UTF-8 output"))?
+        .trim()
+        .to_string();
+    if value.is_empty() {
+        return Err(anyhow!(
+            "`jj config get {key}` returned an empty value\n\nset it with `jj config set --user {key} \"...\"`"
+        ));
+    }
+    Ok(value)
 }
 
 fn find_workspace_root(path: PathBuf) -> Result<PathBuf> {

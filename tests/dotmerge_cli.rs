@@ -715,6 +715,21 @@ fn sync_import_description_includes_host() {
         .unwrap_or_else(|| panic!("unexpected description: {description}"));
     assert!(!host.is_empty());
     assert_ne!(host, "unknown host");
+
+    // The author identity must come from jj's config (read via `jj config get`),
+    // not an empty "(no email set)" default.
+    let author = sandbox
+        .jj_stdout(&[
+            "log",
+            "-r",
+            "current-import",
+            "--no-graph",
+            "-T",
+            "author.name() ++ \" <\" ++ author.email() ++ \">\"",
+        ])
+        .trim()
+        .to_owned();
+    assert_eq!(author, "Test User <test@example.com>");
 }
 
 #[test]
@@ -1236,6 +1251,13 @@ impl TestSandbox {
         let home = tempdir.path().join("home");
         let repo = tempdir.path().join("repo");
         fs::create_dir_all(&home).unwrap();
+        // Give jj an author identity at the HOME level so every repo under this
+        // sandbox resolves one — dotmerge now reads it via `jj config get`, and
+        // refuses to author commits without it.
+        write_file(
+            &home.join(".config/jj/config.toml"),
+            "[user]\nname = \"Test User\"\nemail = \"test@example.com\"\n",
+        );
         Self {
             tempdir,
             home,
