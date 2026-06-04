@@ -73,6 +73,48 @@ fn status_on_initial_repo_reports_missing_last_sync_state() {
 }
 
 #[test]
+fn status_reports_target_already_applied_without_target_diff_details() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    write_file(&sandbox.home().join("foo"), "hello\n");
+
+    let mut add = Command::cargo_bin("dotmerge").unwrap();
+    add.env("HOME", sandbox.home())
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("foo");
+    add.assert().success();
+
+    sandbox.run_jj(&["desc", "-m", "add foo"]);
+
+    let mut sync = Command::cargo_bin("dotmerge").unwrap();
+    sync.env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--target")
+        .arg("@")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    sync.assert().success();
+
+    let mut status = Command::cargo_bin("dotmerge").unwrap();
+    status
+        .env("HOME", sandbox.home())
+        .arg("status")
+        .arg("--target")
+        .arg("root()")
+        .arg("--repo")
+        .arg(sandbox.repo());
+
+    status.assert().success().stdout(
+        predicate::str::contains("target: already applied")
+            .and(predicate::str::contains("target changes since base").not())
+            .and(predicate::str::contains("  - deleted  foo").not()),
+    );
+}
+
+#[test]
 fn sync_on_fresh_empty_repo_records_last_sync_and_clears_current_import() {
     let sandbox = TestSandbox::new();
     sandbox.init_repo();

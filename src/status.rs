@@ -36,6 +36,8 @@ pub fn collect(
         target.clone(),
         client.repo_path().to_path_buf(),
     );
+    let target_already_applied = client.is_ancestor(&target, &current)?;
+    summary.target_already_applied = target_already_applied;
     let managed_paths = managed_paths(client, &target)?;
     let base_entries = client.read_entries_at_rev(&base, &managed_paths)?;
     let target_entries = client.read_entries_at_rev(&target, &managed_paths)?;
@@ -62,21 +64,24 @@ pub fn collect(
             }
         }
 
-        let target_kind = classify_change(base_entry.as_ref(), target_entry.as_ref());
-        if target_kind != FileChangeKind::Unchanged {
-            summary
-                .target_changes
-                .push(FileStatusSummary::new(path.clone(), target_kind.clone()));
-            if matches!(target_kind, FileChangeKind::Deleted)
-                && !summary.deletion_candidates.contains(path)
-            {
-                summary.deletion_candidates.push(path.clone());
+        if !target_already_applied {
+            let target_kind = classify_change(base_entry.as_ref(), target_entry.as_ref());
+            if target_kind != FileChangeKind::Unchanged {
+                summary
+                    .target_changes
+                    .push(FileStatusSummary::new(path.clone(), target_kind.clone()));
+                if matches!(target_kind, FileChangeKind::Deleted)
+                    && !summary.deletion_candidates.contains(path)
+                {
+                    summary.deletion_candidates.push(path.clone());
+                }
             }
         }
     }
 
     summary.home_differs_from_base = !summary.home_changes.is_empty();
-    summary.target_differs_from_base = !summary.target_changes.is_empty();
+    summary.target_differs_from_base =
+        !target_already_applied && !summary.target_changes.is_empty();
 
     if let Some(import_revision) = current_import.revision.as_ref() {
         if current.same_revision(import_revision) {
@@ -169,15 +174,19 @@ pub fn print_summary(summary: &SyncStatusSummary) {
         )
     );
     print_changes("home changes since base", &summary.home_changes);
-    println!(
-        "target: {}",
-        describe_relation(
-            summary.target_differs_from_base,
-            summary.target_changes.len(),
-            "change"
-        )
-    );
-    print_changes("target changes since base", &summary.target_changes);
+    if summary.target_already_applied {
+        println!("target: already applied");
+    } else {
+        println!(
+            "target: {}",
+            describe_relation(
+                summary.target_differs_from_base,
+                summary.target_changes.len(),
+                "change"
+            )
+        );
+        print_changes("target changes since base", &summary.target_changes);
+    }
 
     if summary.deletion_candidates.is_empty() {
         println!("deletions: none");
