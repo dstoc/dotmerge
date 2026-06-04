@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -134,6 +135,36 @@ fn sync_on_fresh_empty_repo_records_last_sync_and_clears_current_import() {
 }
 
 #[test]
+fn sync_commits_one_dotmerge_operation_in_op_log() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    write_file(&sandbox.repo().join("foo"), "shared\n");
+    sandbox.run_jj(&["desc", "-m", "target foo"]);
+    sandbox.run_jj(&["bookmark", "create", "origin/main"]);
+    sandbox.run_jj(&["new", "root()"]);
+
+    write_file(&sandbox.home().join("foo"), "shared\n");
+
+    let mut cmd = Command::cargo_bin("dotmerge").unwrap();
+    cmd.env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+
+    cmd.assert().success();
+
+    let op_log = sandbox.jj_stdout(&["op", "log", "-T", "description.first_line() ++ \"\\n\""]);
+    let dotmerge_ops = op_log.lines().filter(|line| line.contains("dotmerge")).count();
+    assert_eq!(
+        dotmerge_ops, 1,
+        "expected one jj operation for `dotmerge sync`, got:\n{op_log}"
+    );
+}
+
+#[test]
 fn sync_no_export_on_fresh_empty_repo_does_not_record_last_sync() {
     let sandbox = TestSandbox::new();
     sandbox.init_repo();
@@ -151,6 +182,82 @@ fn sync_no_export_on_fresh_empty_repo_does_not_record_last_sync() {
 
     assert_bookmark_absent(sandbox.home(), sandbox.repo(), "last-sync");
     assert_bookmark_absent(sandbox.home(), sandbox.repo(), "current-import");
+}
+
+#[test]
+fn sync_export_failure_leaves_last_sync_and_current_import_unchanged() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    write_file(&sandbox.repo().join("managed/foo"), "shared\n");
+    sandbox.run_jj(&["desc", "-m", "target foo"]);
+    sandbox.run_jj(&["bookmark", "create", "origin/main"]);
+    sandbox.run_jj(&["new", "root()"]);
+
+    write_file(&sandbox.home().join("managed/foo"), "shared\n");
+
+    let mut initial_sync = Command::cargo_bin("dotmerge").unwrap();
+    initial_sync
+        .env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    initial_sync.assert().success();
+
+    write_file(&sandbox.home().join("managed/foo"), "home-2\n");
+
+    let mut prepare_sync = Command::cargo_bin("dotmerge").unwrap();
+    prepare_sync
+        .env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--no-export")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    prepare_sync.assert().success();
+
+    let last_sync_before = sandbox
+        .jj_stdout(&["log", "-r", "last-sync", "--no-graph", "-T", "commit_id"])
+        .trim()
+        .to_owned();
+    let current_import_before = sandbox
+        .jj_stdout(&["log", "-r", "current-import", "--no-graph", "-T", "commit_id"])
+        .trim()
+        .to_owned();
+
+    let managed_dir = sandbox.home().join("managed");
+    let original_mode = fs::metadata(&managed_dir).unwrap().permissions().mode();
+    let readonly_mode = original_mode & !0o222;
+    fs::set_permissions(&managed_dir, fs::Permissions::from_mode(readonly_mode)).unwrap();
+
+    let mut sync = Command::cargo_bin("dotmerge").unwrap();
+    sync.env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+
+    sync.assert()
+        .failure()
+        .stderr(predicate::str::contains("failed to create temp file"));
+
+    fs::set_permissions(&managed_dir, fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let last_sync_after = sandbox
+        .jj_stdout(&["log", "-r", "last-sync", "--no-graph", "-T", "commit_id"])
+        .trim()
+        .to_owned();
+    let current_import_after = sandbox
+        .jj_stdout(&["log", "-r", "current-import", "--no-graph", "-T", "commit_id"])
+        .trim()
+        .to_owned();
+
+    assert_eq!(last_sync_before, last_sync_after);
+    assert_eq!(current_import_before, current_import_after);
 }
 
 #[test]

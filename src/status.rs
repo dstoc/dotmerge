@@ -1,6 +1,6 @@
 use crate::cli::StatusArgs;
 use crate::fs;
-use crate::jj::JjClient;
+use crate::jj::{JjClient, JjSession};
 use crate::model::{
     FileChangeKind, FileStatusSummary, ManagedEntry, RevisionSummary, SyncStatusSummary,
 };
@@ -9,40 +9,80 @@ use anyhow::Result;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+pub(crate) trait StatusSource {
+    fn root_revision(&self) -> Result<RevisionSummary>;
+    fn current_revision(&self) -> Result<RevisionSummary>;
+    fn list_files(&self, rev: &RevisionSummary) -> Result<Vec<PathBuf>>;
+    fn read_entries_at_rev(
+        &self,
+        rev: &RevisionSummary,
+        paths: &BTreeSet<PathBuf>,
+    ) -> Result<std::collections::BTreeMap<PathBuf, Option<ManagedEntry>>>;
+    fn has_conflicts(&self, rev: &RevisionSummary) -> Result<bool>;
+    fn bookmark_summary(&self, name: &str) -> Result<crate::model::BookmarkSummary>;
+    fn is_ancestor(&self, ancestor: &RevisionSummary, descendant: &RevisionSummary)
+        -> Result<bool>;
+}
+
 pub fn run(args: StatusArgs) -> Result<()> {
     let home = util::home_dir()?;
     let client = JjClient::open(&args.common.repo)?;
-    let target = client.resolve_rev(&args.common.target)?;
-    let summary = collect(&client, &home, target)?;
+    let repo_path = client.repo_path().to_path_buf();
+    let session = client.begin()?;
+    let target = session.resolve_rev(&args.common.target)?;
+    let summary = collect(&session, &repo_path, &home, target)?;
     print_summary(&summary);
     Ok(())
 }
 
-pub fn collect(
-    client: &JjClient,
+pub(crate) fn collect(
+    source: &impl StatusSource,
+    repo_path: &Path,
     home: &Path,
     target: RevisionSummary,
 ) -> Result<SyncStatusSummary> {
-    let last_sync = client.bookmark_summary("last-sync")?;
-    let current_import = client.bookmark_summary("current-import")?;
+    collect_with_repo_clean(source, repo_path, home, target, None)
+}
+
+pub(crate) fn collect_for_sync(
+    source: &impl StatusSource,
+    repo_path: &Path,
+    home: &Path,
+    target: RevisionSummary,
+) -> Result<SyncStatusSummary> {
+    collect_with_repo_clean(source, repo_path, home, target, Some(true))
+}
+
+fn collect_with_repo_clean(
+    source: &impl StatusSource,
+    repo_path: &Path,
+    home: &Path,
+    target: RevisionSummary,
+    repo_clean_override: Option<bool>,
+) -> Result<SyncStatusSummary> {
+    let last_sync = source.bookmark_summary("last-sync")?;
+    let current_import = source.bookmark_summary("current-import")?;
     let base = match &last_sync.revision {
         Some(revision) => revision.clone(),
-        None => client.root_revision()?,
+        None => source.root_revision()?,
     };
-    let current = client.current_revision()?;
+    let current = source.current_revision()?;
     let mut summary = SyncStatusSummary::new(
         base.clone(),
         current_import.clone(),
         target.clone(),
-        client.repo_path().to_path_buf(),
+        repo_path.to_path_buf(),
     );
-    let target_already_applied = client.is_ancestor(&target, &current)?;
+    let target_already_applied = source.is_ancestor(&target, &current)?;
     summary.target_already_applied = target_already_applied;
-    let managed_paths = managed_paths(client, &target)?;
-    let base_entries = client.read_entries_at_rev(&base, &managed_paths)?;
-    let target_entries = client.read_entries_at_rev(&target, &managed_paths)?;
+    let managed_paths = managed_paths(source, &target)?;
+    let base_entries = source.read_entries_at_rev(&base, &managed_paths)?;
+    let target_entries = source.read_entries_at_rev(&target, &managed_paths)?;
 
-    summary.repo_clean = Some(client.is_working_copy_clean()?);
+    summary.repo_clean = Some(match repo_clean_override {
+        Some(repo_clean) => repo_clean,
+        None => is_working_copy_clean(source, repo_path)?,
+    });
     if !last_sync.exists {
         summary
             .notes
@@ -96,7 +136,7 @@ pub fn collect(
         }
     }
 
-    summary.has_conflicts = summary.prepared.is_some() && client.has_conflicts(&current)?;
+    summary.has_conflicts = summary.prepared.is_some() && source.has_conflicts(&current)?;
     if summary.has_conflicts {
         summary.notes.push(
             "jj conflicts are present at `@`; resolve them in the repo before export.".to_string(),
@@ -220,20 +260,118 @@ pub fn print_summary(summary: &SyncStatusSummary) {
 }
 
 pub(crate) fn managed_paths(
-    client: &JjClient,
+    source: &impl StatusSource,
     target: &RevisionSummary,
 ) -> Result<BTreeSet<PathBuf>> {
-    let current = client.current_revision()?;
-    if client.is_ancestor(target, &current)? {
-        return client
+    let current = source.current_revision()?;
+    if source.is_ancestor(target, &current)? {
+        return source
             .list_files(&current)
             .map(|files| files.into_iter().collect());
     }
 
     let mut paths = BTreeSet::new();
-    paths.extend(client.list_files(target)?);
-    paths.extend(client.list_files(&current)?);
+    paths.extend(source.list_files(target)?);
+    paths.extend(source.list_files(&current)?);
     Ok(paths)
+}
+
+pub(crate) fn is_working_copy_clean(
+    source: &impl StatusSource,
+    repo_path: &Path,
+) -> Result<bool> {
+    let current = source.current_revision()?;
+    let tracked_paths = source.list_files(&current)?;
+    let repo_paths = fs::list_repo_paths(repo_path)?;
+    let mut managed_paths = tracked_paths.into_iter().collect::<BTreeSet<_>>();
+    managed_paths.extend(repo_paths);
+
+    let current_entries = source.read_entries_at_rev(&current, &managed_paths)?;
+    for path in managed_paths {
+        let fs_entry = fs::read_rooted_entry(repo_path, &path)?;
+        let tree_entry = current_entries.get(&path).cloned().flatten();
+        if tree_entry != fs_entry {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+impl StatusSource for JjClient {
+    fn root_revision(&self) -> Result<RevisionSummary> {
+        JjClient::root_revision(self)
+    }
+
+    fn current_revision(&self) -> Result<RevisionSummary> {
+        JjClient::current_revision(self)
+    }
+
+    fn list_files(&self, rev: &RevisionSummary) -> Result<Vec<PathBuf>> {
+        JjClient::list_files(self, rev)
+    }
+
+    fn read_entries_at_rev(
+        &self,
+        rev: &RevisionSummary,
+        paths: &BTreeSet<PathBuf>,
+    ) -> Result<std::collections::BTreeMap<PathBuf, Option<ManagedEntry>>> {
+        JjClient::read_entries_at_rev(self, rev, paths)
+    }
+
+    fn has_conflicts(&self, rev: &RevisionSummary) -> Result<bool> {
+        JjClient::has_conflicts(self, rev)
+    }
+
+    fn bookmark_summary(&self, name: &str) -> Result<crate::model::BookmarkSummary> {
+        JjClient::bookmark_summary(self, name)
+    }
+
+    fn is_ancestor(
+        &self,
+        ancestor: &RevisionSummary,
+        descendant: &RevisionSummary,
+    ) -> Result<bool> {
+        JjClient::is_ancestor(self, ancestor, descendant)
+    }
+}
+
+impl StatusSource for JjSession {
+    fn root_revision(&self) -> Result<RevisionSummary> {
+        JjSession::root_revision(self)
+    }
+
+    fn current_revision(&self) -> Result<RevisionSummary> {
+        JjSession::current_revision(self)
+    }
+
+    fn list_files(&self, rev: &RevisionSummary) -> Result<Vec<PathBuf>> {
+        JjSession::list_files(self, rev)
+    }
+
+    fn read_entries_at_rev(
+        &self,
+        rev: &RevisionSummary,
+        paths: &BTreeSet<PathBuf>,
+    ) -> Result<std::collections::BTreeMap<PathBuf, Option<ManagedEntry>>> {
+        JjSession::read_entries_at_rev(self, rev, paths)
+    }
+
+    fn has_conflicts(&self, rev: &RevisionSummary) -> Result<bool> {
+        JjSession::has_conflicts(self, rev)
+    }
+
+    fn bookmark_summary(&self, name: &str) -> Result<crate::model::BookmarkSummary> {
+        JjSession::bookmark_summary(self, name)
+    }
+
+    fn is_ancestor(
+        &self,
+        ancestor: &RevisionSummary,
+        descendant: &RevisionSummary,
+    ) -> Result<bool> {
+        JjSession::is_ancestor(self, ancestor, descendant)
+    }
 }
 
 fn classify_change(base: Option<&ManagedEntry>, other: Option<&ManagedEntry>) -> FileChangeKind {

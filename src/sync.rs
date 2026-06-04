@@ -10,53 +10,56 @@ use std::path::Path;
 pub fn run(args: SyncArgs) -> Result<()> {
     let home = util::home_dir()?;
     let client = JjClient::open(&args.common.repo)?;
-    let target = client.resolve_rev(&args.common.target)?;
+    let repo_path = client.repo_path().to_path_buf();
+    let mut session = client.begin()?;
+    let target = session.resolve_rev(&args.common.target)?;
 
-    if !client.is_working_copy_clean()? {
+    if !status::is_working_copy_clean(&session, &repo_path)? {
         return Err(anyhow!(
             "repo working copy is not clean; refusing to start sync until the repo state is unambiguous"
         ));
     }
 
-    let last_sync = client.bookmark_summary("last-sync")?;
-    let current_import = client.bookmark_summary("current-import")?;
+    let last_sync = session.bookmark_summary("last-sync")?;
+    let current_import = session.bookmark_summary("current-import")?;
     let base = match &last_sync.revision {
         Some(revision) => revision.clone(),
-        None => client.root_revision()?,
+        None => session.root_revision()?,
     };
 
-    validate_resume_state(&client, &base, &target, current_import.revision.as_ref())?;
+    validate_resume_state(&base, &target, current_import.revision.as_ref())?;
 
-    let managed_paths = status::managed_paths(&client, &target)?;
-    let imported = client.create_or_refresh_import(&base, &home, &managed_paths)?;
-    let merged = client.merge_revisions(&imported, &target)?;
-    let current = client.current_revision()?;
+    let managed_paths = status::managed_paths(&session, &target)?;
+    let imported = session.create_or_refresh_import(&base, &home, &managed_paths)?;
+    let merged = session.merge_revisions(&imported, &target)?;
+    let current = session.current_revision()?;
     if !merged.same_revision(&current) {
-        client.checkout_revision(&merged)?;
+        session.checkout_revision(&merged)?;
     }
 
-    if client.has_conflicts(&merged)? {
+    if session.has_conflicts(&merged)? {
         return Err(anyhow!(
             "merge produced jj conflicts at `@`; resolve them in the repo, then rerun `dotmerge sync`"
         ));
     }
 
     if args.no_export {
-        let summary = status::collect(&client, &home, target)?;
+        let summary = status::collect_for_sync(&session, &repo_path, &home, target)?;
+        session.finish("dotmerge sync")?;
         status::print_summary(&summary);
         return Ok(());
     }
 
-    export_revision_to_home(&client, &home, &merged, &managed_paths)?;
-    client.complete_sync(&merged)?;
+    export_revision_to_home(&session, &home, &merged, &managed_paths)?;
+    session.complete_sync(&merged)?;
 
-    let summary = status::collect(&client, &home, target)?;
+    let summary = status::collect_for_sync(&session, &repo_path, &home, target)?;
+    session.finish("dotmerge sync")?;
     status::print_summary(&summary);
     Ok(())
 }
 
 fn validate_resume_state(
-    _client: &JjClient,
     _base: &RevisionSummary,
     _target: &RevisionSummary,
     _current_import: Option<&RevisionSummary>,
@@ -65,12 +68,12 @@ fn validate_resume_state(
 }
 
 fn export_revision_to_home(
-    client: &JjClient,
+    session: &impl status::StatusSource,
     home: &Path,
     revision: &RevisionSummary,
     managed_paths: &std::collections::BTreeSet<std::path::PathBuf>,
 ) -> Result<()> {
-    let entries = client.read_entries_at_rev(revision, managed_paths)?;
+    let entries = session.read_entries_at_rev(revision, managed_paths)?;
     let mut export_entries = Vec::new();
     for (path, entry) in entries {
         if let Some(entry) = entry {
