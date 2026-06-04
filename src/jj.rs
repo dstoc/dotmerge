@@ -1,5 +1,6 @@
 use crate::fs;
 use crate::model::{BookmarkSummary, ManagedEntry, RevisionSummary};
+use crate::util;
 use anyhow::{Context, Result, anyhow};
 use chrono::Local;
 use jj_lib::backend::{CommitId, CopyId, TreeValue};
@@ -322,7 +323,7 @@ impl JjClient {
                 .rewrite_commit(&import_commit)
                 .set_parents(vec![current_commit.id().clone()])
                 .set_tree(imported_tree)
-                .set_description("dotmerge import from home")
+                .set_description(self.import_description())
                 .write()
                 .block_on()
                 .context("failed to rewrite imported commit")?;
@@ -333,17 +334,15 @@ impl JjClient {
             commit
         } else if current_is_disposable {
             tx.repo_mut()
-                .rewrite_commit(&current_commit)
-                .set_parents(current_commit.parent_ids().to_vec())
-                .set_tree(imported_tree)
-                .set_description("dotmerge import from home")
+                .new_commit(current_commit.parent_ids().to_vec(), imported_tree)
+                .set_description(self.import_description())
                 .write()
                 .block_on()
-                .context("failed to rewrite disposable `@` as imported commit")?
+                .context("failed to create imported commit on top of disposable `@` parent")?
         } else {
             tx.repo_mut()
                 .new_commit(vec![current_commit.id().clone()], imported_tree)
-                .set_description("dotmerge import from home")
+                .set_description(self.import_description())
                 .write()
                 .block_on()
                 .context("failed to write imported commit")?
@@ -368,7 +367,8 @@ impl JjClient {
         if self.is_ancestor(&left, &right)? {
             return Ok(right);
         }
-        self.create_merge_change(&left, &right, "dotmerge merge")
+        let merge_description = self.merge_description_for_target(&right)?;
+        self.create_merge_change(&[left, right], &merge_description)
     }
 
     pub fn has_conflicts(&self, rev: &RevisionSummary) -> Result<bool> {
@@ -425,6 +425,34 @@ impl JjClient {
 
     fn is_direct_child_of(&self, child: &Commit, parent: &Commit) -> bool {
         child.parent_ids() == [parent.id().clone()]
+    }
+
+    fn import_description(&self) -> String {
+        format!("dotmerge: import changes from {}", util::hostname_label())
+    }
+
+    fn merge_description_for_target(&self, target: &RevisionSummary) -> Result<String> {
+        Ok(format!(
+            "dotmerge: merge {} changes into {}",
+            util::hostname_label(),
+            self.target_label(target)?
+        ))
+    }
+
+    fn target_label(&self, target: &RevisionSummary) -> Result<String> {
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let commit = self.resolve_summary_to_commit(&workspace, &repo, target)?;
+        let mut names = Vec::new();
+        for (name, _) in repo.view().local_bookmarks_for_commit(commit.id()) {
+            names.push(name.as_str().to_string());
+        }
+        names.sort();
+        names.dedup();
+        if names.is_empty() {
+            Ok(commit.id().hex()[..8].to_string())
+        } else {
+            Ok(names.join(", "))
+        }
     }
 
     fn is_disposable_sync_placeholder(&self, repo: &ReadonlyRepo, commit: &Commit) -> Result<bool> {
@@ -531,11 +559,10 @@ impl JjClient {
 
     pub fn create_merge_change(
         &self,
-        left: &RevisionSummary,
-        right: &RevisionSummary,
+        parents: &[RevisionSummary],
         message: &str,
     ) -> Result<RevisionSummary> {
-        self.create_new_change(&[left.clone(), right.clone()], message)
+        self.create_new_change(parents, message)
     }
 
     fn load_workspace_and_repo(&self) -> Result<(Workspace, Arc<ReadonlyRepo>)> {

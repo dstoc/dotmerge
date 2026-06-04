@@ -304,6 +304,150 @@ fn sync_reuses_import_without_merge_when_target_is_ancestor() {
 }
 
 #[test]
+fn sync_merge_description_uses_hostname_and_target_bookmark() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    write_file(&sandbox.repo().join("bar"), "remote\n");
+    sandbox.run_jj(&["desc", "-m", "target bar"]);
+    sandbox.run_jj(&["bookmark", "create", "origin/main"]);
+    sandbox.run_jj(&["new", "root()"]);
+
+    write_file(&sandbox.home().join("foo"), "local\n");
+    let mut add = Command::cargo_bin("dotmerge").unwrap();
+    add.env("HOME", sandbox.home())
+        .env("HOSTNAME", "test-host")
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("foo");
+    add.assert().success();
+    sandbox.run_jj(&["desc", "-m", "add foo"]);
+
+    let mut sync = Command::cargo_bin("dotmerge").unwrap();
+    sync.env("HOME", sandbox.home())
+        .env("HOSTNAME", "test-host")
+        .arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    sync.assert().success();
+
+    let description = sandbox
+        .jj_stdout(&[
+            "log",
+            "-r",
+            "last-sync",
+            "--no-graph",
+            "-T",
+            "description.first_line()",
+        ])
+        .trim()
+        .to_owned();
+    assert_eq!(
+        description,
+        "dotmerge: merge test-host changes into origin/main"
+    );
+}
+
+#[test]
+fn sync_merge_description_uses_target_short_id_when_unbookmarked() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    write_file(&sandbox.repo().join("bar"), "remote\n");
+    sandbox.run_jj(&["desc", "-m", "target bar"]);
+    let target_short = sandbox
+        .jj_stdout(&["log", "-r", "@", "--no-graph", "-T", "commit_id.short()"])
+        .trim()
+        .chars()
+        .take(8)
+        .collect::<String>();
+    sandbox.run_jj(&["new", "root()"]);
+
+    write_file(&sandbox.home().join("foo"), "local\n");
+    let mut add = Command::cargo_bin("dotmerge").unwrap();
+    add.env("HOME", sandbox.home())
+        .env("HOSTNAME", "test-host")
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("foo");
+    add.assert().success();
+    sandbox.run_jj(&["desc", "-m", "add foo"]);
+
+    let mut sync = Command::cargo_bin("dotmerge").unwrap();
+    sync.env("HOME", sandbox.home())
+        .env("HOSTNAME", "test-host")
+        .arg("sync")
+        .arg("--target")
+        .arg(&target_short)
+        .arg("--repo")
+        .arg(sandbox.repo());
+    sync.assert().success();
+
+    let description = sandbox
+        .jj_stdout(&[
+            "log",
+            "-r",
+            "last-sync",
+            "--no-graph",
+            "-T",
+            "description.first_line()",
+        ])
+        .trim()
+        .to_owned();
+    assert_eq!(
+        description,
+        format!("dotmerge: merge test-host changes into {target_short}")
+    );
+}
+
+#[test]
+fn sync_import_description_uses_unknown_host_when_hostname_missing() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    write_file(&sandbox.home().join("foo"), "old\n");
+    let mut add = Command::cargo_bin("dotmerge").unwrap();
+    add.env("HOME", sandbox.home())
+        .env_remove("HOSTNAME")
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("foo");
+    add.assert().success();
+    sandbox.run_jj(&["desc", "-m", "add foo"]);
+    sandbox.run_jj(&["bookmark", "create", "origin/main"]);
+
+    write_file(&sandbox.home().join("foo"), "new\n");
+    let mut sync = Command::cargo_bin("dotmerge").unwrap();
+    sync.env("HOME", sandbox.home())
+        .env_remove("HOSTNAME")
+        .arg("sync")
+        .arg("--no-export")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    sync.assert().success();
+
+    let description = sandbox
+        .jj_stdout(&[
+            "log",
+            "-r",
+            "current-import",
+            "--no-graph",
+            "-T",
+            "description.first_line()",
+        ])
+        .trim()
+        .to_owned();
+    assert_eq!(description, "dotmerge: import changes from unknown host");
+}
+
+#[test]
 fn sync_stops_managing_target_file_deleted_in_at() {
     let sandbox = TestSandbox::new();
     sandbox.init_repo();
