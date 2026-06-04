@@ -53,12 +53,10 @@ impl JjClient {
         let workspace_root = find_workspace_root(repo_path.into())?;
         let settings = UserSettings::from_config(StackedConfig::with_defaults())
             .context("failed to construct default jj settings")?;
-        let client = Self {
+        Ok(Self {
             workspace_root,
             settings,
-        };
-        client.load_workspace_and_repo()?;
-        Ok(client)
+        })
     }
 
     pub(crate) fn begin(&self) -> Result<JjSession> {
