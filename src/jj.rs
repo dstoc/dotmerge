@@ -1,5 +1,5 @@
 use crate::fs;
-use crate::model::{BookmarkSummary, ManagedEntry, RevisionSummary};
+use crate::model::{BookmarkSummary, ManagedEntry, ResumeState, RevisionSummary};
 use crate::util;
 use anyhow::{anyhow, Context, Result};
 use chrono::Local;
@@ -220,6 +220,39 @@ impl JjClient {
             .set_local_bookmark_target("current-import".as_ref(), RefTarget::absent());
         tx.commit("complete dotmerge sync").block_on()?;
         Ok(())
+    }
+
+    pub(crate) fn resume_state(
+        &self,
+        base: &RevisionSummary,
+        current_import: Option<&RevisionSummary>,
+    ) -> Result<ResumeState> {
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let current = self.current_revision()?;
+        let current_commit = self.resolve_summary_to_commit(&workspace, &repo, &current)?;
+        let current_is_disposable =
+            self.is_disposable_sync_placeholder(repo.as_ref(), &current_commit)?;
+
+        match current_import {
+            None => Ok(ResumeState::Fresh),
+            Some(current_import) => {
+                let import_commit =
+                    self.resolve_summary_to_commit(&workspace, &repo, current_import)?;
+                let current_import_has_conflicts = self.has_conflicts(current_import)?;
+                let current_import_is_descendant_of_base =
+                    self.is_ancestor(base, current_import)?;
+                Ok(resume_state_for_commits(
+                    base,
+                    &current,
+                    &current_commit,
+                    current_import,
+                    &import_commit,
+                    current_import_has_conflicts,
+                    current_import_is_descendant_of_base,
+                    current_is_disposable,
+                ))
+            }
+        }
     }
 
     pub fn create_or_refresh_import(
@@ -763,6 +796,70 @@ impl JjClient {
     }
 }
 
+fn resume_state_for_commits(
+    base: &RevisionSummary,
+    current: &RevisionSummary,
+    current_commit: &Commit,
+    current_import: &RevisionSummary,
+    import_commit: &Commit,
+    current_import_has_conflicts: bool,
+    current_import_is_descendant_of_base: bool,
+    current_is_disposable: bool,
+) -> ResumeState {
+    if current_import.resolved.is_none() {
+        return ResumeState::Blocked {
+            reason: format!(
+                "`current-import` ({}) is unresolved\n\nresolve the bookmark before rerunning `dotmerge sync`.",
+                current_import.short_id()
+            ),
+        };
+    }
+
+    if current_import_has_conflicts {
+        return ResumeState::Blocked {
+            reason: format!(
+                "`current-import` ({}) has unresolved conflicts\n\nresolve the conflicts in `current-import`, then rerun `dotmerge sync`.",
+                current_import.short_id()
+            ),
+        };
+    }
+
+    if !current_import_is_descendant_of_base {
+        return ResumeState::Blocked {
+            reason: format!(
+                "`current-import` ({}) is not a descendant of base ({})\n\nit does not look like a dotmerge import on top of the current sync base.\ninspect it with `jj log`, then either:\n  - reset it with `jj bookmark delete current-import`\n  - or move it onto the sync base before rerunning `dotmerge sync`",
+                current_import.short_id(),
+                base.short_id()
+            ),
+        };
+    }
+
+    if current.same_revision(current_import) {
+        return ResumeState::Resumable;
+    }
+
+    if import_commit.parent_ids().len() == 1 && import_commit.parent_ids()[0] == *current_commit.id()
+    {
+        return ResumeState::Resumable;
+    }
+
+    if current_is_disposable {
+        if let Some(current_parent) = current_commit.parent_ids().first() {
+            if import_commit.parent_ids().len() == 1 && import_commit.parent_ids()[0] == *current_parent
+            {
+                return ResumeState::Resumable;
+            }
+        }
+    }
+
+    ResumeState::Blocked {
+        reason: format!(
+            "`current-import` ({}) does not look like a dotmerge import on top of the current sync base\n\ninspect it with `jj log`, then either:\n  - reset it with `jj bookmark delete current-import`\n  - or move it onto the sync base before rerunning `dotmerge sync`",
+            current_import.short_id()
+        ),
+    }
+}
+
 impl JjSession {
     fn repo(&self) -> &dyn jj_lib::repo::Repo {
         self.tx.repo()
@@ -886,6 +983,36 @@ impl JjSession {
             .set_local_bookmark_target("current-import".as_ref(), RefTarget::absent());
         self.dirty = true;
         Ok(())
+    }
+
+    pub(crate) fn resume_state(
+        &self,
+        base: &RevisionSummary,
+        current_import: Option<&RevisionSummary>,
+    ) -> Result<ResumeState> {
+        let current = self.current_revision()?;
+        let current_commit = self.resolve_summary_to_commit(&current)?;
+        let current_is_disposable = self.is_disposable_sync_placeholder(self.repo(), &current_commit)?;
+
+        match current_import {
+            None => Ok(ResumeState::Fresh),
+            Some(current_import) => {
+                let import_commit = self.resolve_summary_to_commit(current_import)?;
+                let current_import_has_conflicts = self.has_conflicts(current_import)?;
+                let current_import_is_descendant_of_base =
+                    self.is_ancestor(base, current_import)?;
+                Ok(resume_state_for_commits(
+                    base,
+                    &current,
+                    &current_commit,
+                    current_import,
+                    &import_commit,
+                    current_import_has_conflicts,
+                    current_import_is_descendant_of_base,
+                    current_is_disposable,
+                ))
+            }
+        }
     }
 
     pub fn create_or_refresh_import(

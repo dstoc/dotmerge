@@ -1,7 +1,7 @@
 use crate::cli::SyncArgs;
 use crate::fs;
 use crate::jj::JjClient;
-use crate::model::RevisionSummary;
+use crate::model::{ResumeState, RevisionSummary};
 use crate::status;
 use crate::util;
 use anyhow::{Result, anyhow};
@@ -27,7 +27,7 @@ pub fn run(args: SyncArgs) -> Result<()> {
         None => session.root_revision()?,
     };
 
-    validate_resume_state(&base, &target, current_import.revision.as_ref())?;
+    validate_resume_state(&session, &base, current_import.revision.as_ref())?;
 
     let managed_paths = status::managed_paths(&session, &target)?;
     let imported = session.create_or_refresh_import(&base, &home, &managed_paths)?;
@@ -60,11 +60,14 @@ pub fn run(args: SyncArgs) -> Result<()> {
 }
 
 fn validate_resume_state(
-    _base: &RevisionSummary,
-    _target: &RevisionSummary,
-    _current_import: Option<&RevisionSummary>,
+    session: &impl status::StatusSource,
+    base: &RevisionSummary,
+    current_import: Option<&RevisionSummary>,
 ) -> Result<()> {
-    Ok(())
+    match session.resume_state(base, current_import)? {
+        ResumeState::Fresh | ResumeState::Resumable => Ok(()),
+        ResumeState::Blocked { reason } => Err(anyhow!(reason)),
+    }
 }
 
 fn export_revision_to_home(

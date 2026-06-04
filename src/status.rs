@@ -2,7 +2,8 @@ use crate::cli::StatusArgs;
 use crate::fs;
 use crate::jj::{JjClient, JjSession};
 use crate::model::{
-    FileChangeKind, FileStatusSummary, ManagedEntry, RevisionSummary, SyncStatusSummary,
+    FileChangeKind, FileStatusSummary, ManagedEntry, ResumeState, RevisionSummary,
+    SyncStatusSummary,
 };
 use crate::util;
 use anyhow::Result;
@@ -22,6 +23,11 @@ pub(crate) trait StatusSource {
     fn bookmark_summary(&self, name: &str) -> Result<crate::model::BookmarkSummary>;
     fn is_ancestor(&self, ancestor: &RevisionSummary, descendant: &RevisionSummary)
         -> Result<bool>;
+    fn resume_state(
+        &self,
+        base: &RevisionSummary,
+        current_import: Option<&RevisionSummary>,
+    ) -> Result<ResumeState>;
 }
 
 pub fn run(args: StatusArgs) -> Result<()> {
@@ -67,6 +73,7 @@ fn collect_with_repo_clean(
         None => source.root_revision()?,
     };
     let current = source.current_revision()?;
+    let resume_state = source.resume_state(&base, current_import.revision.as_ref())?;
     let mut summary = SyncStatusSummary::new(
         base.clone(),
         current_import.clone(),
@@ -123,20 +130,16 @@ fn collect_with_repo_clean(
     summary.target_differs_from_base =
         !target_already_applied && !summary.target_changes.is_empty();
 
+    if let Some(note) = current_import_note(&resume_state, &current, current_import.revision.as_ref()) {
+        summary.notes.push(note);
+    }
     if let Some(import_revision) = current_import.revision.as_ref() {
-        if current.same_revision(import_revision) {
-            summary.notes.push(
-                "`current-import` already matches `@` and will be refreshed on sync.".to_string(),
-            );
-        } else {
+        if matches!(resume_state, ResumeState::Resumable) && !current.same_revision(import_revision) {
             summary.prepared = Some(current.clone());
-            summary
-                .notes
-                .push("sync will replace `current-import` with a direct child of the current repo-side `@` state before refreshing it.".to_string());
         }
     }
 
-    summary.has_conflicts = summary.prepared.is_some() && source.has_conflicts(&current)?;
+    summary.has_conflicts = source.has_conflicts(&current)?;
     if summary.has_conflicts {
         summary.notes.push(
             "jj conflicts are present at `@`; resolve them in the repo before export.".to_string(),
@@ -152,7 +155,11 @@ fn collect_with_repo_clean(
             .notes
             .push("deletion candidates are present; MVP sync will only report them, not remove files from `$HOME`.".to_string());
     }
-    if summary.repo_clean != Some(true) {
+    if matches!(resume_state, ResumeState::Blocked { .. }) {
+        summary
+            .next_actions
+            .push("repair `current-import` until it satisfies the resume preconditions, then rerun `dotmerge sync`".to_string());
+    } else if summary.repo_clean != Some(true) {
         summary
             .next_actions
             .push("repair the repo state until the working copy is clean".to_string());
@@ -181,6 +188,24 @@ fn collect_with_repo_clean(
     }
 
     Ok(summary)
+}
+
+fn current_import_note(
+    resume_state: &ResumeState,
+    current: &RevisionSummary,
+    current_import: Option<&RevisionSummary>,
+) -> Option<String> {
+    match resume_state {
+        ResumeState::Fresh => Some("`current-import` is missing; sync will start fresh.".to_string()),
+        ResumeState::Resumable => current_import.map(|import_revision| {
+            if current.same_revision(import_revision) {
+                "`current-import` already matches `@` and will be refreshed on sync.".to_string()
+            } else {
+                "sync will replace `current-import` with a direct child of the current repo-side `@` state before refreshing it.".to_string()
+            }
+        }),
+        ResumeState::Blocked { reason } => Some(reason.clone()),
+    }
 }
 
 pub fn print_summary(summary: &SyncStatusSummary) {
@@ -334,6 +359,14 @@ impl StatusSource for JjClient {
     ) -> Result<bool> {
         JjClient::is_ancestor(self, ancestor, descendant)
     }
+
+    fn resume_state(
+        &self,
+        base: &RevisionSummary,
+        current_import: Option<&RevisionSummary>,
+    ) -> Result<ResumeState> {
+        JjClient::resume_state(self, base, current_import)
+    }
 }
 
 impl StatusSource for JjSession {
@@ -371,6 +404,14 @@ impl StatusSource for JjSession {
         descendant: &RevisionSummary,
     ) -> Result<bool> {
         JjSession::is_ancestor(self, ancestor, descendant)
+    }
+
+    fn resume_state(
+        &self,
+        base: &RevisionSummary,
+        current_import: Option<&RevisionSummary>,
+    ) -> Result<ResumeState> {
+        JjSession::resume_state(self, base, current_import)
     }
 }
 

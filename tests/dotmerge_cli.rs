@@ -116,6 +116,186 @@ fn status_reports_target_already_applied_without_target_diff_details() {
 }
 
 #[test]
+fn status_and_sync_block_unrelated_current_import_without_moving_bookmarks() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    write_file(&sandbox.repo().join("bar"), "remote\n");
+    sandbox.run_jj(&["desc", "-m", "target bar"]);
+    sandbox.run_jj(&["bookmark", "create", "origin/main"]);
+
+    write_file(&sandbox.home().join("foo"), "local\n");
+    let mut add = Command::cargo_bin("dotmerge").unwrap();
+    add.env("HOME", sandbox.home())
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("foo");
+    add.assert().success();
+    sandbox.run_jj(&["desc", "-m", "add foo"]);
+
+    let mut initial_sync = Command::cargo_bin("dotmerge").unwrap();
+    initial_sync
+        .env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    initial_sync.assert().success();
+
+    write_file(&sandbox.home().join("foo"), "local-2\n");
+
+    let mut prepare_sync = Command::cargo_bin("dotmerge").unwrap();
+    prepare_sync
+        .env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--no-export")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    prepare_sync.assert().success();
+
+    sandbox.run_jj(&["new", "root()"]);
+    sandbox.run_jj(&["bookmark", "set", "current-import", "-r", "@", "-B"]);
+
+    let last_sync_before = sandbox
+        .jj_stdout(&["log", "-r", "last-sync", "--no-graph", "-T", "commit_id"])
+        .trim()
+        .to_owned();
+    let current_import_before = sandbox
+        .jj_stdout(&["log", "-r", "current-import", "--no-graph", "-T", "commit_id"])
+        .trim()
+        .to_owned();
+
+    let mut status = Command::cargo_bin("dotmerge").unwrap();
+    status
+        .env("HOME", sandbox.home())
+        .arg("status")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+
+    status.assert().success().stdout(
+        predicate::str::contains("`current-import` (")
+            .and(predicate::str::contains("is not a descendant of base"))
+            .and(predicate::str::contains("inspect it with `jj log`"))
+            .and(predicate::str::contains(
+                "repair `current-import` until it satisfies the resume preconditions, then rerun `dotmerge sync`",
+            )),
+    );
+
+    let mut sync = Command::cargo_bin("dotmerge").unwrap();
+    sync.env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+
+    sync.assert().failure().stderr(
+        predicate::str::contains("`current-import` (")
+            .and(predicate::str::contains("is not a descendant of base"))
+            .and(predicate::str::contains("inspect it with `jj log`")),
+    );
+
+    let last_sync_after = sandbox
+        .jj_stdout(&["log", "-r", "last-sync", "--no-graph", "-T", "commit_id"])
+        .trim()
+        .to_owned();
+    let current_import_after = sandbox
+        .jj_stdout(&["log", "-r", "current-import", "--no-graph", "-T", "commit_id"])
+        .trim()
+        .to_owned();
+
+    assert_eq!(last_sync_before, last_sync_after);
+    assert_eq!(current_import_before, current_import_after);
+}
+
+#[test]
+fn sync_recovers_from_interrupted_import_after_resume_state_validation() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    write_file(&sandbox.repo().join("managed/foo"), "shared\n");
+    sandbox.run_jj(&["desc", "-m", "target foo"]);
+    sandbox.run_jj(&["bookmark", "create", "origin/main"]);
+    sandbox.run_jj(&["new", "root()"]);
+
+    write_file(&sandbox.home().join("managed/foo"), "shared\n");
+
+    let mut initial_sync = Command::cargo_bin("dotmerge").unwrap();
+    initial_sync
+        .env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    initial_sync.assert().success();
+
+    write_file(&sandbox.home().join("managed/foo"), "home-2\n");
+
+    let mut prepare_sync = Command::cargo_bin("dotmerge").unwrap();
+    prepare_sync
+        .env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--no-export")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    prepare_sync.assert().success();
+
+    let managed_dir = sandbox.home().join("managed");
+    let original_mode = fs::metadata(&managed_dir).unwrap().permissions().mode();
+    let readonly_mode = original_mode & !0o222;
+    fs::set_permissions(&managed_dir, fs::Permissions::from_mode(readonly_mode)).unwrap();
+
+    let mut interrupted_sync = Command::cargo_bin("dotmerge").unwrap();
+    interrupted_sync
+        .env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    interrupted_sync
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("failed to create temp file"));
+
+    fs::set_permissions(&managed_dir, fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let mut status = Command::cargo_bin("dotmerge").unwrap();
+    status
+        .env("HOME", sandbox.home())
+        .arg("status")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    status.assert().success().stdout(
+        predicate::str::contains("`current-import`")
+            .and(predicate::str::contains("will be refreshed on sync").or(predicate::str::contains(
+                "before refreshing it.",
+            ))),
+    );
+
+    let mut rerun_sync = Command::cargo_bin("dotmerge").unwrap();
+    rerun_sync
+        .env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    rerun_sync.assert().success();
+}
+
+#[test]
 fn sync_on_fresh_empty_repo_records_last_sync_and_clears_current_import() {
     let sandbox = TestSandbox::new();
     sandbox.init_repo();

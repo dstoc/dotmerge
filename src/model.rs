@@ -57,6 +57,13 @@ impl BookmarkSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResumeState {
+    Fresh,
+    Resumable,
+    Blocked { reason: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ManagedEntry {
     File { contents: Vec<u8>, executable: bool },
     Symlink { target: PathBuf },
