@@ -417,3 +417,257 @@ fn unique_temp_path(destination: &Path) -> Result<PathBuf> {
         nanos
     )))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use tempfile::TempDir;
+
+    // -----------------------------------------------------------------------
+    // normalize_absolute_path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn normalize_collapses_dot_and_dotdot() -> Result<()> {
+        let result = normalize_absolute_path(Path::new("/home/u/./a/../b"))?;
+        assert_eq!(result, PathBuf::from("/home/u/b"));
+        Ok(())
+    }
+
+    #[test]
+    fn normalize_dotdot_at_root_stays_clamped() -> Result<()> {
+        // Going above root should clamp at root, not escape it.
+        let result = normalize_absolute_path(Path::new("/../../../etc/passwd"))?;
+        assert_eq!(result, PathBuf::from("/etc/passwd"));
+        Ok(())
+    }
+
+    #[test]
+    fn normalize_rejects_relative_path() {
+        let result = normalize_absolute_path(Path::new("relative/path"));
+        assert!(result.is_err(), "expected error for relative path");
+    }
+
+    #[test]
+    fn normalize_clean_absolute_path_unchanged() -> Result<()> {
+        let result = normalize_absolute_path(Path::new("/a/b/c"))?;
+        assert_eq!(result, PathBuf::from("/a/b/c"));
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_home_path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_absolute_path_inside_home_accepted() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let home = tmp.path();
+        let input = home.join("subdir/file.txt");
+        let result = resolve_home_path(&input, home)?;
+        assert!(result.starts_with(home));
+        assert_eq!(result, home.join("subdir/file.txt"));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_tilde_prefix_expands_to_home() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let home = tmp.path();
+        let result = resolve_home_path(Path::new("~/x"), home)?;
+        assert!(result.starts_with(home));
+        assert_eq!(result, home.join("x"));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_bare_relative_path_resolves_under_home() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let home = tmp.path();
+        let result = resolve_home_path(Path::new("x"), home)?;
+        assert!(result.starts_with(home));
+        assert_eq!(result, home.join("x"));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_tilde_dotdot_outside_home_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        // ~/../outside lexically resolves to <home>/../outside which is outside home
+        let result = resolve_home_path(Path::new("~/../outside"), home);
+        assert!(result.is_err(), "expected rejection for path escaping home via ~/../");
+    }
+
+    #[test]
+    fn resolve_absolute_path_outside_home_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        // Construct an absolute path that goes outside: <home>/../outside
+        let outside = home.join("../outside");
+        let result = resolve_home_path(&outside, home);
+        assert!(result.is_err(), "expected rejection for absolute path outside home");
+    }
+
+    #[test]
+    fn resolve_relative_dotdot_outside_home_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        // ../etc/passwd relative to home resolves outside
+        let result = resolve_home_path(Path::new("../etc/passwd"), home);
+        assert!(result.is_err(), "expected rejection for ../etc/passwd");
+    }
+
+    // -----------------------------------------------------------------------
+    // ensure_source_resolves_inside_home
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ensure_regular_file_inside_home_accepted() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let home = tmp.path();
+        let file_path = home.join("myfile.txt");
+        fs::write(&file_path, b"content")?;
+        // is_symlink=false: uses fs::canonicalize on the file itself
+        ensure_source_resolves_inside_home(&file_path, home, false)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_symlink_inside_home_pointing_outside_accepted() -> Result<()> {
+        // The function checks that the *symlink itself* (its location) is inside home,
+        // not where the symlink points. A symlink inside home whose target is outside
+        // home is accepted — the target path is stored separately, not validated here.
+        let tmp = TempDir::new()?;
+        let home = tmp.path();
+
+        // Create a real file outside of home (one level up in a sibling dir)
+        let outside_dir = tmp.path().parent().unwrap().join("dotmerge-test-outside");
+        fs::create_dir_all(&outside_dir)?;
+        let outside_file = outside_dir.join("secret.txt");
+        fs::write(&outside_file, b"secret")?;
+
+        // Create a symlink inside home pointing to the outside file
+        let link_path = home.join("escape_link");
+        symlink(&outside_file, &link_path)?;
+
+        // is_symlink=true: only canonicalizes the *parent*, then re-joins the filename.
+        // The symlink's location is inside home, so this must succeed.
+        ensure_source_resolves_inside_home(&link_path, home, true)?;
+
+        let _ = fs::remove_dir_all(&outside_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_symlink_inside_home_pointing_inside_accepted() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let home = tmp.path();
+
+        // Create a real file inside home
+        let target_file = home.join("target.txt");
+        fs::write(&target_file, b"content")?;
+
+        // Create a symlink inside home pointing to the target file inside home
+        let link_path = home.join("link_to_target");
+        symlink(&target_file, &link_path)?;
+
+        // is_symlink=true: the symlink's parent (home) is canonicalized, symlink itself is not followed
+        ensure_source_resolves_inside_home(&link_path, home, true)?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_add_source (end-to-end)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_regular_file_returns_correct_repo_path_and_kind() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let home = tmp.path();
+        let file_path = home.join("config/settings.toml");
+        fs::create_dir_all(file_path.parent().unwrap())?;
+        fs::write(&file_path, b"[settings]")?;
+
+        let result = validate_add_source(&file_path, home)?;
+
+        assert_eq!(result.repo_path, PathBuf::from("config/settings.toml"));
+        assert!(
+            matches!(result.kind, AddSourceKind::File { .. }),
+            "expected File kind"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validate_path_outside_home_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        // Use an absolute path that is a parent of home — definitely outside
+        let outside = home.parent().unwrap().to_path_buf();
+        let result = validate_add_source(&outside, home);
+        assert!(result.is_err(), "expected rejection for path outside home");
+    }
+
+    #[test]
+    fn validate_directory_rejected() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let home = tmp.path();
+        let dir_path = home.join("mydir");
+        fs::create_dir_all(&dir_path)?;
+
+        let result = validate_add_source(&dir_path, home);
+        assert!(result.is_err(), "expected rejection for directory input");
+        Ok(())
+    }
+
+    #[test]
+    fn validate_symlink_escaping_home_is_accepted_target_stored() -> Result<()> {
+        // validate_add_source accepts a symlink inside home whose target is outside.
+        // The design stores the target path verbatim in AddSourceKind::Symlink — it does
+        // not restrict where a symlink may point, only that the symlink file itself lives
+        // under home.
+        let tmp = TempDir::new()?;
+        let home = tmp.path();
+
+        let outside_dir = tmp.path().parent().unwrap().join("dotmerge-test-outside2");
+        fs::create_dir_all(&outside_dir)?;
+        let outside_file = outside_dir.join("secret2.txt");
+        fs::write(&outside_file, b"secret")?;
+
+        let link_path = home.join("external_link");
+        symlink(&outside_file, &link_path)?;
+
+        let result = validate_add_source(&link_path, home)?;
+        assert_eq!(result.repo_path, PathBuf::from("external_link"));
+        assert!(
+            matches!(result.kind, AddSourceKind::Symlink { ref target } if target == &outside_file),
+            "expected Symlink kind with the outside target stored verbatim"
+        );
+
+        let _ = fs::remove_dir_all(&outside_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn validate_symlink_inside_home_returns_symlink_kind() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let home = tmp.path();
+
+        let target_file = home.join("dotfile");
+        fs::write(&target_file, b"data")?;
+
+        let link_path = home.join("link_to_dotfile");
+        symlink(&target_file, &link_path)?;
+
+        let result = validate_add_source(&link_path, home)?;
+        assert_eq!(result.repo_path, PathBuf::from("link_to_dotfile"));
+        assert!(
+            matches!(result.kind, AddSourceKind::Symlink { .. }),
+            "expected Symlink kind"
+        );
+        Ok(())
+    }
+}
