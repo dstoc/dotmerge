@@ -154,6 +154,44 @@ fn sync_no_export_on_fresh_empty_repo_does_not_record_last_sync() {
 }
 
 #[test]
+fn sync_reuses_target_without_preserving_disposable_empty_at() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    write_file(&sandbox.repo().join("foo"), "hello\n");
+    sandbox.run_jj(&["desc", "-m", "target foo"]);
+    sandbox.run_jj(&["bookmark", "create", "origin/main"]);
+    sandbox.run_jj(&["new", "root()"]);
+
+    let disposable_at = sandbox
+        .jj_stdout(&["log", "-r", "@", "--no-graph", "-T", "commit_id"])
+        .trim()
+        .to_owned();
+
+    let mut sync = Command::cargo_bin("dotmerge").unwrap();
+    sync.env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    sync.assert().success();
+
+    let ancestry = sandbox.jj_stdout(&[
+        "log",
+        "-r",
+        &format!("{disposable_at}::last-sync"),
+        "--no-graph",
+        "-T",
+        "commit_id ++ \"\\n\"",
+    ]);
+    assert!(
+        !ancestry.lines().any(|line| line.trim() == disposable_at),
+        "expected disposable empty `@` not to remain in sync ancestry; ancestry was:\n{ancestry}"
+    );
+}
+
+#[test]
 fn sync_reuses_existing_added_revision_as_import_ancestor() {
     let sandbox = TestSandbox::new();
     sandbox.init_repo();

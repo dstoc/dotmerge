@@ -434,6 +434,7 @@ Suggested behavior:
 3. Normalize `current-import` so it is a direct child of the current clean repo-side `@` revision.
    - if the existing bookmark is already there, it may be rewritten in place
    - otherwise, replace it with a fresh import commit at that position
+   - if the current repo-side `@` is just a disposable empty placeholder (single parent, empty description, empty tree), sync may rewrite through it rather than preserving it in history
 4. Compute managed paths from the repo-side parent state.
    - if the requested target is already an ancestor of that repo-side parent, use only the parent tree's paths
    - otherwise, use the union of that parent tree's paths and the target tree's paths

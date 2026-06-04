@@ -302,6 +302,8 @@ impl JjClient {
         let imported_tree =
             jj_lib::merged_tree::MergedTree::resolved(repo.store().clone(), imported_tree_id);
         let mut tx = repo.start_transaction();
+        let current_is_disposable =
+            self.is_disposable_sync_placeholder(repo.as_ref(), &current_commit)?;
         let reusable_import = match current_import.revision.as_ref() {
             Some(revision) => {
                 let import_commit = self.resolve_summary_to_commit(&workspace, &repo, revision)?;
@@ -329,6 +331,15 @@ impl JjClient {
                 .block_on()
                 .context("failed to rebase descendants after refreshing current-import")?;
             commit
+        } else if current_is_disposable {
+            tx.repo_mut()
+                .rewrite_commit(&current_commit)
+                .set_parents(current_commit.parent_ids().to_vec())
+                .set_tree(imported_tree)
+                .set_description("dotmerge import from home")
+                .write()
+                .block_on()
+                .context("failed to rewrite disposable `@` as imported commit")?
         } else {
             tx.repo_mut()
                 .new_commit(vec![current_commit.id().clone()], imported_tree)
@@ -350,13 +361,14 @@ impl JjClient {
         left: &RevisionSummary,
         right: &RevisionSummary,
     ) -> Result<RevisionSummary> {
-        if self.is_ancestor(right, left)? {
-            return Ok(left.clone());
+        let (left, right) = self.normalize_disposable_current_in_merge_inputs(left, right)?;
+        if self.is_ancestor(&right, &left)? {
+            return Ok(left);
         }
-        if self.is_ancestor(left, right)? {
-            return Ok(right.clone());
+        if self.is_ancestor(&left, &right)? {
+            return Ok(right);
         }
-        self.create_merge_change(left, right, "dotmerge merge")
+        self.create_merge_change(&left, &right, "dotmerge merge")
     }
 
     pub fn has_conflicts(&self, rev: &RevisionSummary) -> Result<bool> {
@@ -415,6 +427,51 @@ impl JjClient {
         child.parent_ids() == [parent.id().clone()]
     }
 
+    fn is_disposable_sync_placeholder(&self, repo: &ReadonlyRepo, commit: &Commit) -> Result<bool> {
+        if commit.parent_ids().len() != 1 || !commit.description().is_empty() {
+            return Ok(false);
+        }
+        commit
+            .is_empty(repo)
+            .block_on()
+            .context("failed to determine whether current `@` is empty")
+    }
+
+    fn normalize_disposable_current_in_merge_inputs(
+        &self,
+        left: &RevisionSummary,
+        right: &RevisionSummary,
+    ) -> Result<(RevisionSummary, RevisionSummary)> {
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let current = self.current_revision()?;
+        let current_commit = self.resolve_summary_to_commit(&workspace, &repo, &current)?;
+        if !self.is_disposable_sync_placeholder(repo.as_ref(), &current_commit)? {
+            return Ok((left.clone(), right.clone()));
+        }
+        if left.same_revision(&current) && right.same_revision(&current) {
+            return Ok((left.clone(), right.clone()));
+        }
+
+        let parent_id = current_commit
+            .parent_ids()
+            .first()
+            .cloned()
+            .ok_or_else(|| anyhow!("disposable current `@` must have exactly one parent"))?;
+        let parent = self.revision_summary(parent_id.hex(), &parent_id);
+
+        let left = if left.same_revision(&current) {
+            parent.clone()
+        } else {
+            left.clone()
+        };
+        let right = if right.same_revision(&current) {
+            parent
+        } else {
+            right.clone()
+        };
+        Ok((left, right))
+    }
+
     pub fn checkout_revision(&self, rev: &RevisionSummary) -> Result<()> {
         let (mut workspace, repo) = self.load_workspace_and_repo()?;
         let commit = self.resolve_summary_to_commit(&workspace, &repo, rev)?;
@@ -423,6 +480,10 @@ impl JjClient {
             .edit(workspace.workspace_name().to_owned(), &commit)
             .block_on()
             .context("failed to update the workspace commit")?;
+        tx.repo_mut()
+            .rebase_descendants()
+            .block_on()
+            .context("failed to rebase descendants after updating the workspace commit")?;
         let new_repo = tx.commit("update working copy for dotmerge").block_on()?;
         workspace
             .check_out(new_repo.op_id().clone(), None, &commit)
