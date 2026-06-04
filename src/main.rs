@@ -1,3 +1,5 @@
+#![warn(unused)]
+
 mod add;
 mod cli;
 mod fs;

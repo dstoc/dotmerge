@@ -1,37 +1,27 @@
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RevisionSummary {
-    pub expression: String,
-    pub resolved: Option<String>,
-    pub exact: bool,
+pub(crate) struct RevisionSummary {
+    pub(crate) expression: String,
+    pub(crate) resolved: Option<String>,
 }
 
 impl RevisionSummary {
-    pub fn unresolved(expression: impl Into<String>) -> Self {
-        Self {
-            expression: expression.into(),
-            resolved: None,
-            exact: false,
-        }
-    }
-
-    pub fn resolved(expression: impl Into<String>, resolved: impl Into<String>) -> Self {
+    pub(crate) fn resolved(expression: impl Into<String>, resolved: impl Into<String>) -> Self {
         Self {
             expression: expression.into(),
             resolved: Some(resolved.into()),
-            exact: true,
         }
     }
 
-    pub fn short_id(&self) -> String {
+    pub(crate) fn short_id(&self) -> String {
         self.resolved
             .as_deref()
             .map(|hex| hex.chars().take(8).collect())
             .unwrap_or_else(|| self.expression.clone())
     }
 
-    pub fn same_revision(&self, other: &Self) -> bool {
+    pub(crate) fn same_revision(&self, other: &Self) -> bool {
         match (&self.resolved, &other.resolved) {
             (Some(left), Some(right)) => left == right,
             _ => self.expression == other.expression,
@@ -40,14 +30,14 @@ impl RevisionSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BookmarkSummary {
-    pub name: String,
-    pub revision: Option<RevisionSummary>,
-    pub exists: bool,
+pub(crate) struct BookmarkSummary {
+    pub(crate) name: String,
+    pub(crate) revision: Option<RevisionSummary>,
+    pub(crate) exists: bool,
 }
 
 impl BookmarkSummary {
-    pub fn missing(name: impl Into<String>) -> Self {
+    pub(crate) fn missing(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             revision: None,
@@ -57,50 +47,38 @@ impl BookmarkSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ResumeState {
+pub(crate) enum ResumeState {
     Fresh,
     Resumable,
     Blocked { reason: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ManagedEntry {
+pub(crate) enum ManagedEntry {
     File { contents: Vec<u8>, executable: bool },
     Symlink { target: PathBuf },
     Conflict,
     Unsupported { kind: String },
 }
 
-impl ManagedEntry {
-    pub fn describe(&self) -> &'static str {
-        match self {
-            ManagedEntry::File { .. } => "file",
-            ManagedEntry::Symlink { .. } => "symlink",
-            ManagedEntry::Conflict => "conflict",
-            ManagedEntry::Unsupported { .. } => "unsupported",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FileChangeKind {
+pub(crate) enum FileChangeKind {
     Added,
     Modified,
     Deleted,
     Conflict,
     Unchanged,
-    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FileStatusSummary {
-    pub path: PathBuf,
-    pub kind: FileChangeKind,
-    pub detail: Option<String>,
+pub(crate) struct FileStatusSummary {
+    pub(crate) path: PathBuf,
+    pub(crate) kind: FileChangeKind,
+    pub(crate) detail: Option<String>,
 }
 
 impl FileStatusSummary {
-    pub fn new(path: impl Into<PathBuf>, kind: FileChangeKind) -> Self {
+    pub(crate) fn new(path: impl Into<PathBuf>, kind: FileChangeKind) -> Self {
         Self {
             path: path.into(),
             kind,
@@ -110,26 +88,26 @@ impl FileStatusSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SyncStatusSummary {
-    pub base: RevisionSummary,
-    pub current_import: BookmarkSummary,
-    pub target: RevisionSummary,
-    pub repo_path: PathBuf,
-    pub prepared: Option<RevisionSummary>,
-    pub repo_clean: Option<bool>,
-    pub home_differs_from_base: bool,
-    pub target_differs_from_base: bool,
-    pub target_already_applied: bool,
-    pub has_conflicts: bool,
-    pub home_changes: Vec<FileStatusSummary>,
-    pub target_changes: Vec<FileStatusSummary>,
-    pub deletion_candidates: Vec<PathBuf>,
-    pub notes: Vec<String>,
-    pub next_actions: Vec<String>,
+pub(crate) struct SyncStatusSummary {
+    pub(crate) base: RevisionSummary,
+    pub(crate) current_import: BookmarkSummary,
+    pub(crate) target: RevisionSummary,
+    pub(crate) repo_path: PathBuf,
+    pub(crate) prepared: Option<RevisionSummary>,
+    pub(crate) repo_clean: Option<bool>,
+    pub(crate) home_differs_from_base: bool,
+    pub(crate) target_differs_from_base: bool,
+    pub(crate) target_already_applied: bool,
+    pub(crate) has_conflicts: bool,
+    pub(crate) home_changes: Vec<FileStatusSummary>,
+    pub(crate) target_changes: Vec<FileStatusSummary>,
+    pub(crate) deletion_candidates: Vec<PathBuf>,
+    pub(crate) notes: Vec<String>,
+    pub(crate) next_actions: Vec<String>,
 }
 
 impl SyncStatusSummary {
-    pub fn new(
+    pub(crate) fn new(
         base: RevisionSummary,
         current_import: BookmarkSummary,
         target: RevisionSummary,
@@ -156,15 +134,15 @@ impl SyncStatusSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AddSourceKind {
+pub(crate) enum AddSourceKind {
     File { mode: u32 },
     Symlink { target: PathBuf },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ValidatedAddSource {
-    pub input_path: PathBuf,
-    pub source_path: PathBuf,
-    pub repo_path: PathBuf,
-    pub kind: AddSourceKind,
+pub(crate) struct ValidatedAddSource {
+    pub(crate) input_path: PathBuf,
+    pub(crate) source_path: PathBuf,
+    pub(crate) repo_path: PathBuf,
+    pub(crate) kind: AddSourceKind,
 }

@@ -466,6 +466,5 @@ fn kind_label(kind: &FileChangeKind) -> &'static str {
         FileChangeKind::Deleted => "deleted",
         FileChangeKind::Conflict => "conflict",
         FileChangeKind::Unchanged => "same",
-        FileChangeKind::Unknown => "unknown",
     }
 }
