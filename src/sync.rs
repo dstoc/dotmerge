@@ -32,13 +32,13 @@ pub fn run(args: SyncArgs) -> Result<()> {
 
     let managed_paths = status::managed_paths(&session, &target)?;
     let imported = import::create_or_refresh_import(&mut session, &base, &home, &managed_paths)?;
-    let merged = merge::merge_revisions(&mut session, &imported, &target)?;
+    let merged = merge::merge_revisions(&mut session, &imported.revision, &target)?;
     let current = session.current_revision()?;
-    if !merged.same(&current) {
-        session.checkout_revision(&merged)?;
+    if !merged.revision().same(&current) {
+        session.checkout_revision(merged.revision())?;
     }
 
-    if session.has_conflicts(&merged)? {
+    if session.has_conflicts(merged.revision())? {
         return Err(anyhow!(
             "merge produced jj conflicts at `@`; resolve them in the repo, then rerun `dotmerge sync`"
         ));
@@ -51,8 +51,8 @@ pub fn run(args: SyncArgs) -> Result<()> {
         return Ok(());
     }
 
-    export::export_revision_to_home(&session, &home, &merged, &managed_paths)?;
-    session.complete_sync(&merged)?;
+    export::export_revision_to_home(&session, &home, merged.revision(), &managed_paths)?;
+    session.complete_sync(merged.revision())?;
 
     let summary = status::collect_for_sync(&session, &repo_path, &home, target)?;
     session.finish("dotmerge sync")?;

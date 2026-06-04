@@ -1,6 +1,7 @@
 use crate::fs;
 use crate::jj::JjSession;
-use crate::model::{ManagedEntry, Revision};
+use crate::model::{FileStatusSummary, ImportOutcome, ManagedEntry, Revision};
+use crate::status;
 use crate::util;
 use anyhow::{anyhow, Context, Result};
 use jj_lib::backend::TreeId;
@@ -27,7 +28,7 @@ pub(crate) fn create_or_refresh_import(
     base: &Revision,
     home_state: &Path,
     managed_paths: &BTreeSet<PathBuf>,
-) -> Result<Revision> {
+) -> Result<ImportOutcome> {
     let current = session.current_revision()?;
     let current_commit = session.resolve_revision_to_commit(&current)?;
     let current_import = session.bookmark_summary("current-import")?;
@@ -139,6 +140,8 @@ pub(crate) fn create_or_refresh_import(
         &current_tree_id,
     )?;
 
+    let imported = compute_home_delta(session, base, home_state, managed_paths)?;
+
     let import_description = import_description();
     let commit = match placement {
         ImportPlacement::ReuseRepoSide => {
@@ -148,7 +151,7 @@ pub(crate) fn create_or_refresh_import(
                     .set_local_bookmark_target("current-import".as_ref(), RefTarget::absent());
                 session.mark_dirty();
             }
-            return Ok(current);
+            return Ok(ImportOutcome { revision: current, imported });
         }
         ImportPlacement::RewriteInPlace(import_commit) => {
             let commit = session
@@ -187,10 +190,30 @@ pub(crate) fn create_or_refresh_import(
         RefTarget::normal(commit.id().clone()),
     );
     session.mark_dirty();
-    Ok(Revision::new(
-        commit.id().clone(),
-        "current-import",
-    ))
+    Ok(ImportOutcome {
+        revision: Revision::new(commit.id().clone(), "current-import"),
+        imported,
+    })
+}
+
+fn compute_home_delta(
+    session: &JjSession,
+    base: &Revision,
+    home_state: &Path,
+    managed_paths: &BTreeSet<PathBuf>,
+) -> Result<Vec<FileStatusSummary>> {
+    let base_entries = session.read_entries_at_rev(base, managed_paths)?;
+    let mut changes = Vec::new();
+    for path in managed_paths {
+        let base_entry = base_entries.get(path).cloned().flatten();
+        let home_entry = fs::read_rooted_entry(home_state, path)?;
+        let kind = status::classify_change(base_entry.as_ref(), home_entry.as_ref());
+        if kind != crate::model::FileChangeKind::Unchanged {
+            changes.push(FileStatusSummary::new(path.clone(), kind));
+        }
+    }
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(changes)
 }
 
 pub(crate) fn decide_import_placement(

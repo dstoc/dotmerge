@@ -164,6 +164,29 @@ impl SyncStatusSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ImportOutcome {
+    pub(crate) revision: Revision,
+    pub(crate) imported: Vec<FileStatusSummary>, // base -> $HOME delta; empty when $HOME has no drift
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MergeOutcome {
+    NoOp { revision: Revision },        // target already contained the import (right ⊆ left)
+    FastForward { revision: Revision }, // advanced to target (left ⊆ right)
+    Merged { revision: Revision },      // a real merge commit was created
+}
+
+impl MergeOutcome {
+    pub(crate) fn revision(&self) -> &Revision {
+        match self {
+            MergeOutcome::NoOp { revision }
+            | MergeOutcome::FastForward { revision }
+            | MergeOutcome::Merged { revision } => revision,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AddSourceKind {
     File { mode: u32 },
     Symlink { target: PathBuf },

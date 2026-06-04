@@ -358,7 +358,7 @@ impl StatusSource for JjSession {
     }
 }
 
-fn classify_change(base: Option<&ManagedEntry>, other: Option<&ManagedEntry>) -> FileChangeKind {
+pub(crate) fn classify_change(base: Option<&ManagedEntry>, other: Option<&ManagedEntry>) -> FileChangeKind {
     match (base, other) {
         (None, None) => FileChangeKind::Unchanged,
         (Some(_), None) => FileChangeKind::Deleted,
