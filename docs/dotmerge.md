@@ -314,6 +314,7 @@ merged revision -> home
 The export phase should:
 
 - copy managed files from the merged revision into `$HOME`
+- skip files whose `$HOME` content already matches the merged revision, so an unchanged path is left untouched and a no-op sync writes nothing
 - write home files atomically
 - create parent directories as needed
 - preserve executable bits
@@ -358,27 +359,28 @@ Status should report:
 - whether deletion candidates are present
 - whether a sync would require import, merge, export, or conflict resolution
 
+Status leads with a single headline state — one of `up to date`, `local changes`, `incoming`, `diverged`, `merge prepared`, `conflict`, `blocked`, or `repo dirty` — followed by the base/target/import/repo facts, the incoming and local change lists, and a single `sync will:` line naming the one next move (replacing an enumerated multi-step plan).
+
 Example high-level output:
 
 ```text
-base:   last-sync          = qpvuntsm
-import: current-import     = kmnopqrs (exists, will update)
-merge:  prepared at @      (exists)
-target: origin/main        = mzytrlsq
-repo:   ~/dotmerge-repo
+state:   incoming — target is 1 change ahead of last-sync
 
-home changes since base:
-  modified .zshrc
-  added    .config/kitty/kitty.conf
+base:    last-sync     qpvuntsm
+target:  origin/main   mzytrlsq
+import:  none
+repo:    ~/dotmerge-repo  (clean)
 
-target changes since base:
-  modified .config/sway/config
+incoming changes (target since base):
+  - modified .config/sway/config
+local changes ($HOME since base):
+  - modified .zshrc
+  - added    .config/kitty/kitty.conf
 
-sync plan:
-  import home changes
-  merge with target
-  export merged result to $HOME
+sync will:  merge target into the imported $HOME state, then export
 ```
+
+A missing `last-sync` is shown as `none` rather than the empty-tree id. The `merge prepared` state additionally shows the prepared `@` revision. The `blocked` state shows the same reason `sync` would error with.
 
 If conflicts are expected or already present, status should say so explicitly.
 
@@ -412,7 +414,7 @@ It should:
 
 A later full `dotmerge sync` should still refresh `current-import` again from the current managed `$HOME` state before exporting.
 
-After it completes, it should show status-style summary output for the prepared state.
+After it completes, it should show the status summary for the prepared state, which reports the `merge prepared` state.
 
 ### `dotmerge sync --target REV --repo PATH`
 
@@ -451,7 +453,7 @@ Suggested behavior:
 
 After a successful sync, leave the repo working copy at the final merged/exported revision.
 
-After it completes, it should show status-style summary output for the new synced state.
+After a successful export, it should report what changed rather than a forecast: what was imported from `$HOME`, whether a merge commit was created (or a fast-forward, or nothing), and which files were written back — only the files that actually differed from `$HOME`. It also shows the `last-sync` transition, and collapses to a single "already up to date" line when nothing moved.
 
 If the imported change or merge result is redundant because an existing revision already represents the desired result, `dotmerge` should reuse that existing revision instead of creating a new merge commit.
 
