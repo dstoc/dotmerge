@@ -487,7 +487,7 @@ Suggested behavior:
 4. Copy or stage each file into the repo working copy selected by `--repo` at the corresponding repo-relative path.
 5. Make those files visible to the next import/merge/export cycle.
 
-When copying into the repo, `dotmerge add` should preserve executable bits and symlink identity.
+When copying into the repo, `dotmerge add` should preserve executable bits and symlink identity. A managed symlink may point outside `$HOME`: `add` only requires the symlink's own location to be inside `$HOME`, and records the link verbatim rather than copying whatever it points to.
 
 `PATH` may be absolute or home-relative, as long as it resolves unambiguously inside `$HOME`.
 
@@ -535,32 +535,21 @@ The tool should not depend on Git refs directly.
 
 The underlying repo may be Git-backed, but `dotmerge` should speak jj through `jj-lib`.
 
-Suggested internal capabilities:
+The jj layer lives in `jj.rs` and is the only module that imports `jj-lib`; the
+rest of `dotmerge` speaks plain data types. It is split into:
 
-```rust
-struct JjRepo;
+- `JjClient`, a thin handle that locates the workspace (`open`, `begin`,
+  `repo_path`, `working_copy_path`).
+- `JjSession`, returned by `begin()` after loading the workspace once. It owns a
+  single jj `Transaction`; every read and mutation in a command goes through it,
+  and `finish()` commits exactly one jj operation — so one `dotmerge sync` is one
+  `op log` entry.
 
-impl JjRepo {
-    fn open(repo_path: &Path) -> Result<Self>;
-    fn resolve_rev(&self, revset: &str) -> Result<CommitId>;
-    fn read_tree(&self, rev: &CommitId) -> Result<TreeId>;
-    fn set_bookmark(&mut self, name: &str, rev: &CommitId) -> Result<()>;
-    fn clear_bookmark(&mut self, name: &str) -> Result<()>;
-    fn create_or_refresh_import(
-        &mut self,
-        base: &CommitId,
-        home_state: &HomeState,
-    ) -> Result<CommitId>;
-    fn merge_revisions(
-        &mut self,
-        left: &CommitId,
-        right: &CommitId,
-    ) -> Result<CommitId>;
-    fn has_conflicts(&self, rev: &CommitId) -> Result<bool>;
-}
-```
-
-Keep the rest of `dotmerge` behind this abstraction rather than spreading `jj-lib` details throughout the codebase.
+Revisions are carried internally as a `CommitId`; identity is commit-id
+equality, not revset-string comparison. Because export to `$HOME` runs before
+`finish()`, a failed export leaves the transaction uncommitted and `last-sync`
+unmoved, which is what enforces the "last-sync only moves after a successful
+export" invariant.
 
 If `--repo` does not point to a valid jj repo, `dotmerge` should hard error.
 
@@ -665,42 +654,23 @@ Build the MVP in **Rust**.
 
 Shell is fine for a quick spike, but this tool writes into `$HOME`, tracks path mappings, stages imported filesystem content, and needs careful error handling. Rust will make the real version easier to test and safer to evolve.
 
-Suggested crate shape:
+The crate layout:
 
 ```text
-src/main.rs
-src/config.rs
-src/jj.rs
-src/import.rs
-src/merge.rs
-src/export.rs
-src/fs.rs
-src/status.rs
+src/main.rs     command dispatch
+src/cli.rs      argument parsing
+src/model.rs    data types
+src/util.rs     home / hostname helpers
+src/jj.rs       jj-lib plumbing (JjClient + JjSession)
+src/import.rs   import phase + placement
+src/merge.rs    merge phase
+src/export.rs   export phase
+src/status.rs   status output + clean-copy check
+src/fs.rs       filesystem read/write + path safety
+src/add.rs      `dotmerge add`
 ```
 
-Internal model could look like:
-
-```rust
-struct SyncPlan {
-    base_rev: String,
-    target_rev: String,
-    has_home_changes: bool,
-    requires_merge: bool,
-    export_paths: Vec<std::path::PathBuf>,
-}
-```
-
-And the jj layer can stay simple:
-
-```rust
-struct Jj;
-
-impl Jj {
-    fn file_at_rev(&self, rev: &str, path: &Path) -> Result<Option<Vec<u8>>>;
-    fn new_from_rev(&self, rev: &str) -> Result<()>;
-    fn set_bookmark(&self, name: &str, rev: &str) -> Result<()>;
-}
-```
+There is no `config.rs` yet (config is deferred).
 
 ---
 
