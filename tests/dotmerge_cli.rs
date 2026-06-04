@@ -13,9 +13,8 @@ fn add_accepts_home_relative_file_and_copies_into_repo_worktree() {
 
     sandbox.init_repo();
 
-    let mut cmd = Command::cargo_bin("dotmerge").unwrap();
-    cmd.env("HOME", sandbox.home())
-        .arg("add")
+    let mut cmd = sandbox.dotmerge();
+    cmd.arg("add")
         .arg("--repo")
         .arg(sandbox.repo())
         .arg(".config/sway/config");
@@ -36,9 +35,8 @@ fn add_rejects_path_outside_home() {
 
     sandbox.init_repo();
 
-    let mut cmd = Command::cargo_bin("dotmerge").unwrap();
-    cmd.env("HOME", sandbox.home())
-        .arg("add")
+    let mut cmd = sandbox.dotmerge();
+    cmd.arg("add")
         .arg("--repo")
         .arg(sandbox.repo())
         .arg(&outside_path);
@@ -53,9 +51,8 @@ fn status_on_initial_repo_reports_missing_last_sync_state() {
     let sandbox = TestSandbox::new();
     sandbox.init_repo();
 
-    let mut cmd = Command::cargo_bin("dotmerge").unwrap();
-    cmd.env("HOME", sandbox.home())
-        .arg("status")
+    let mut cmd = sandbox.dotmerge();
+    cmd.arg("status")
         .arg("--target")
         .arg("@")
         .arg("--repo")
@@ -78,9 +75,8 @@ fn status_reports_target_already_applied_without_target_diff_details() {
 
     write_file(&sandbox.home().join("foo"), "hello\n");
 
-    let mut add = Command::cargo_bin("dotmerge").unwrap();
-    add.env("HOME", sandbox.home())
-        .arg("add")
+    let mut add = sandbox.dotmerge();
+    add.arg("add")
         .arg("--repo")
         .arg(sandbox.repo())
         .arg("foo");
@@ -88,18 +84,16 @@ fn status_reports_target_already_applied_without_target_diff_details() {
 
     sandbox.run_jj(&["desc", "-m", "add foo"]);
 
-    let mut sync = Command::cargo_bin("dotmerge").unwrap();
-    sync.env("HOME", sandbox.home())
-        .arg("sync")
+    let mut sync = sandbox.dotmerge();
+    sync.arg("sync")
         .arg("--target")
         .arg("@")
         .arg("--repo")
         .arg(sandbox.repo());
     sync.assert().success();
 
-    let mut status = Command::cargo_bin("dotmerge").unwrap();
+    let mut status = sandbox.dotmerge();
     status
-        .env("HOME", sandbox.home())
         .arg("status")
         .arg("--target")
         .arg("root()")
@@ -123,18 +117,16 @@ fn status_and_sync_block_unrelated_current_import_without_moving_bookmarks() {
     sandbox.run_jj(&["bookmark", "create", "origin/main"]);
 
     write_file(&sandbox.home().join("foo"), "local\n");
-    let mut add = Command::cargo_bin("dotmerge").unwrap();
-    add.env("HOME", sandbox.home())
-        .arg("add")
+    let mut add = sandbox.dotmerge();
+    add.arg("add")
         .arg("--repo")
         .arg(sandbox.repo())
         .arg("foo");
     add.assert().success();
     sandbox.run_jj(&["desc", "-m", "add foo"]);
 
-    let mut initial_sync = Command::cargo_bin("dotmerge").unwrap();
+    let mut initial_sync = sandbox.dotmerge();
     initial_sync
-        .env("HOME", sandbox.home())
         .arg("sync")
         .arg("--target")
         .arg("origin/main")
@@ -144,9 +136,8 @@ fn status_and_sync_block_unrelated_current_import_without_moving_bookmarks() {
 
     write_file(&sandbox.home().join("foo"), "local-2\n");
 
-    let mut prepare_sync = Command::cargo_bin("dotmerge").unwrap();
+    let mut prepare_sync = sandbox.dotmerge();
     prepare_sync
-        .env("HOME", sandbox.home())
         .arg("sync")
         .arg("--no-export")
         .arg("--target")
@@ -167,9 +158,8 @@ fn status_and_sync_block_unrelated_current_import_without_moving_bookmarks() {
         .trim()
         .to_owned();
 
-    let mut status = Command::cargo_bin("dotmerge").unwrap();
+    let mut status = sandbox.dotmerge();
     status
-        .env("HOME", sandbox.home())
         .arg("status")
         .arg("--target")
         .arg("origin/main")
@@ -185,9 +175,8 @@ fn status_and_sync_block_unrelated_current_import_without_moving_bookmarks() {
             )),
     );
 
-    let mut sync = Command::cargo_bin("dotmerge").unwrap();
-    sync.env("HOME", sandbox.home())
-        .arg("sync")
+    let mut sync = sandbox.dotmerge();
+    sync.arg("sync")
         .arg("--target")
         .arg("origin/main")
         .arg("--repo")
@@ -224,9 +213,8 @@ fn sync_recovers_from_interrupted_import_after_resume_state_validation() {
 
     write_file(&sandbox.home().join("managed/foo"), "shared\n");
 
-    let mut initial_sync = Command::cargo_bin("dotmerge").unwrap();
+    let mut initial_sync = sandbox.dotmerge();
     initial_sync
-        .env("HOME", sandbox.home())
         .arg("sync")
         .arg("--target")
         .arg("origin/main")
@@ -237,9 +225,8 @@ fn sync_recovers_from_interrupted_import_after_resume_state_validation() {
     // Drift $HOME, then prepare a merge without exporting (sets current-import).
     write_file(&sandbox.home().join("managed/foo"), "home-2\n");
 
-    let mut prepare_sync = Command::cargo_bin("dotmerge").unwrap();
+    let mut prepare_sync = sandbox.dotmerge();
     prepare_sync
-        .env("HOME", sandbox.home())
         .arg("sync")
         .arg("--no-export")
         .arg("--target")
@@ -262,9 +249,8 @@ fn sync_recovers_from_interrupted_import_after_resume_state_validation() {
     let readonly_mode = original_mode & !0o222;
     fs::set_permissions(&managed_dir, fs::Permissions::from_mode(readonly_mode)).unwrap();
 
-    let mut interrupted_sync = Command::cargo_bin("dotmerge").unwrap();
+    let mut interrupted_sync = sandbox.dotmerge();
     interrupted_sync
-        .env("HOME", sandbox.home())
         .arg("sync")
         .arg("--target")
         .arg("origin/main")
@@ -277,9 +263,8 @@ fn sync_recovers_from_interrupted_import_after_resume_state_validation() {
 
     fs::set_permissions(&managed_dir, fs::Permissions::from_mode(original_mode)).unwrap();
 
-    let mut status = Command::cargo_bin("dotmerge").unwrap();
+    let mut status = sandbox.dotmerge();
     status
-        .env("HOME", sandbox.home())
         .arg("status")
         .arg("--target")
         .arg("origin/main")
@@ -293,9 +278,8 @@ fn sync_recovers_from_interrupted_import_after_resume_state_validation() {
             )),
     );
 
-    let mut rerun_sync = Command::cargo_bin("dotmerge").unwrap();
+    let mut rerun_sync = sandbox.dotmerge();
     rerun_sync
-        .env("HOME", sandbox.home())
         .arg("sync")
         .arg("--target")
         .arg("origin/main")
@@ -309,9 +293,8 @@ fn sync_on_fresh_empty_repo_records_last_sync_and_clears_current_import() {
     let sandbox = TestSandbox::new();
     sandbox.init_repo();
 
-    let mut cmd = Command::cargo_bin("dotmerge").unwrap();
-    cmd.env("HOME", sandbox.home())
-        .arg("sync")
+    let mut cmd = sandbox.dotmerge();
+    cmd.arg("sync")
         .arg("--target")
         .arg("@")
         .arg("--repo")
@@ -335,9 +318,8 @@ fn sync_commits_one_dotmerge_operation_in_op_log() {
 
     write_file(&sandbox.home().join("foo"), "shared\n");
 
-    let mut cmd = Command::cargo_bin("dotmerge").unwrap();
-    cmd.env("HOME", sandbox.home())
-        .arg("sync")
+    let mut cmd = sandbox.dotmerge();
+    cmd.arg("sync")
         .arg("--target")
         .arg("origin/main")
         .arg("--repo")
@@ -358,9 +340,8 @@ fn sync_no_export_on_fresh_empty_repo_does_not_record_last_sync() {
     let sandbox = TestSandbox::new();
     sandbox.init_repo();
 
-    let mut cmd = Command::cargo_bin("dotmerge").unwrap();
-    cmd.env("HOME", sandbox.home())
-        .arg("sync")
+    let mut cmd = sandbox.dotmerge();
+    cmd.arg("sync")
         .arg("--no-export")
         .arg("--target")
         .arg("@")
@@ -385,9 +366,8 @@ fn sync_export_failure_leaves_last_sync_and_current_import_unchanged() {
 
     write_file(&sandbox.home().join("managed/foo"), "shared\n");
 
-    let mut initial_sync = Command::cargo_bin("dotmerge").unwrap();
+    let mut initial_sync = sandbox.dotmerge();
     initial_sync
-        .env("HOME", sandbox.home())
         .arg("sync")
         .arg("--target")
         .arg("origin/main")
@@ -398,9 +378,8 @@ fn sync_export_failure_leaves_last_sync_and_current_import_unchanged() {
     // Drift $HOME, then prepare a merge without exporting (sets current-import).
     write_file(&sandbox.home().join("managed/foo"), "home-2\n");
 
-    let mut prepare_sync = Command::cargo_bin("dotmerge").unwrap();
+    let mut prepare_sync = sandbox.dotmerge();
     prepare_sync
-        .env("HOME", sandbox.home())
         .arg("sync")
         .arg("--no-export")
         .arg("--target")
@@ -432,9 +411,8 @@ fn sync_export_failure_leaves_last_sync_and_current_import_unchanged() {
     let readonly_mode = original_mode & !0o222;
     fs::set_permissions(&managed_dir, fs::Permissions::from_mode(readonly_mode)).unwrap();
 
-    let mut sync = Command::cargo_bin("dotmerge").unwrap();
-    sync.env("HOME", sandbox.home())
-        .arg("sync")
+    let mut sync = sandbox.dotmerge();
+    sync.arg("sync")
         .arg("--target")
         .arg("origin/main")
         .arg("--repo")
@@ -474,9 +452,8 @@ fn sync_reuses_target_without_preserving_disposable_empty_at() {
         .trim()
         .to_owned();
 
-    let mut sync = Command::cargo_bin("dotmerge").unwrap();
-    sync.env("HOME", sandbox.home())
-        .arg("sync")
+    let mut sync = sandbox.dotmerge();
+    sync.arg("sync")
         .arg("--target")
         .arg("origin/main")
         .arg("--repo")
@@ -509,9 +486,8 @@ fn sync_reuses_existing_added_revision_as_import_ancestor() {
 
     write_file(&sandbox.home().join("foo"), "hello\n");
 
-    let mut add = Command::cargo_bin("dotmerge").unwrap();
-    add.env("HOME", sandbox.home())
-        .arg("add")
+    let mut add = sandbox.dotmerge();
+    add.arg("add")
         .arg("--repo")
         .arg(sandbox.repo())
         .arg("foo");
@@ -528,9 +504,8 @@ fn sync_reuses_existing_added_revision_as_import_ancestor() {
         "expected an `adding foo` revision"
     );
 
-    let mut sync = Command::cargo_bin("dotmerge").unwrap();
-    sync.env("HOME", sandbox.home())
-        .arg("sync")
+    let mut sync = sandbox.dotmerge();
+    sync.arg("sync")
         .arg("--target")
         .arg("origin/main")
         .arg("--repo")
@@ -558,9 +533,8 @@ fn sync_reuses_import_without_merge_when_target_is_ancestor() {
 
     write_file(&sandbox.home().join("foo"), "hello\n");
 
-    let mut add = Command::cargo_bin("dotmerge").unwrap();
-    add.env("HOME", sandbox.home())
-        .arg("add")
+    let mut add = sandbox.dotmerge();
+    add.arg("add")
         .arg("--repo")
         .arg(sandbox.repo())
         .arg("foo");
@@ -569,9 +543,8 @@ fn sync_reuses_import_without_merge_when_target_is_ancestor() {
     sandbox.run_jj(&["desc", "-m", "adding foo"]);
     sandbox.run_jj(&["bookmark", "create", "origin/main"]);
 
-    let mut sync = Command::cargo_bin("dotmerge").unwrap();
-    sync.env("HOME", sandbox.home())
-        .arg("sync")
+    let mut sync = sandbox.dotmerge();
+    sync.arg("sync")
         .arg("--target")
         .arg("origin/main")
         .arg("--repo")
@@ -620,9 +593,8 @@ fn sync_merge_description_uses_hostname_and_target_bookmark() {
     sandbox.run_jj(&["new", "root()"]);
 
     write_file(&sandbox.home().join("foo"), "local\n");
-    let mut add = Command::cargo_bin("dotmerge").unwrap();
-    add.env("HOME", sandbox.home())
-        .env("HOSTNAME", "test-host")
+    let mut add = sandbox.dotmerge();
+    add.env("HOSTNAME", "test-host")
         .arg("add")
         .arg("--repo")
         .arg(sandbox.repo())
@@ -630,9 +602,8 @@ fn sync_merge_description_uses_hostname_and_target_bookmark() {
     add.assert().success();
     sandbox.run_jj(&["desc", "-m", "add foo"]);
 
-    let mut sync = Command::cargo_bin("dotmerge").unwrap();
-    sync.env("HOME", sandbox.home())
-        .env("HOSTNAME", "test-host")
+    let mut sync = sandbox.dotmerge();
+    sync.env("HOSTNAME", "test-host")
         .arg("sync")
         .arg("--target")
         .arg("origin/main")
@@ -673,9 +644,8 @@ fn sync_merge_description_uses_target_short_id_when_unbookmarked() {
     sandbox.run_jj(&["new", "root()"]);
 
     write_file(&sandbox.home().join("foo"), "local\n");
-    let mut add = Command::cargo_bin("dotmerge").unwrap();
-    add.env("HOME", sandbox.home())
-        .env("HOSTNAME", "test-host")
+    let mut add = sandbox.dotmerge();
+    add.env("HOSTNAME", "test-host")
         .arg("add")
         .arg("--repo")
         .arg(sandbox.repo())
@@ -683,9 +653,8 @@ fn sync_merge_description_uses_target_short_id_when_unbookmarked() {
     add.assert().success();
     sandbox.run_jj(&["desc", "-m", "add foo"]);
 
-    let mut sync = Command::cargo_bin("dotmerge").unwrap();
-    sync.env("HOME", sandbox.home())
-        .env("HOSTNAME", "test-host")
+    let mut sync = sandbox.dotmerge();
+    sync.env("HOSTNAME", "test-host")
         .arg("sync")
         .arg("--target")
         .arg(&target_short)
@@ -716,9 +685,8 @@ fn sync_import_description_uses_unknown_host_when_hostname_missing() {
     sandbox.init_repo();
 
     write_file(&sandbox.home().join("foo"), "old\n");
-    let mut add = Command::cargo_bin("dotmerge").unwrap();
-    add.env("HOME", sandbox.home())
-        .env_remove("HOSTNAME")
+    let mut add = sandbox.dotmerge();
+    add.env_remove("HOSTNAME")
         .arg("add")
         .arg("--repo")
         .arg(sandbox.repo())
@@ -728,9 +696,8 @@ fn sync_import_description_uses_unknown_host_when_hostname_missing() {
     sandbox.run_jj(&["bookmark", "create", "origin/main"]);
 
     write_file(&sandbox.home().join("foo"), "new\n");
-    let mut sync = Command::cargo_bin("dotmerge").unwrap();
-    sync.env("HOME", sandbox.home())
-        .env_remove("HOSTNAME")
+    let mut sync = sandbox.dotmerge();
+    sync.env_remove("HOSTNAME")
         .arg("sync")
         .arg("--no-export")
         .arg("--target")
@@ -760,9 +727,8 @@ fn sync_stops_managing_target_file_deleted_in_at() {
 
     write_file(&sandbox.home().join("foo"), "hello\n");
 
-    let mut add = Command::cargo_bin("dotmerge").unwrap();
-    add.env("HOME", sandbox.home())
-        .arg("add")
+    let mut add = sandbox.dotmerge();
+    add.arg("add")
         .arg("--repo")
         .arg(sandbox.repo())
         .arg("foo");
@@ -774,9 +740,8 @@ fn sync_stops_managing_target_file_deleted_in_at() {
     fs::remove_file(sandbox.repo().join("foo")).unwrap();
     sandbox.run_jj(&["describe", "-m", "remove foo"]);
 
-    let mut sync = Command::cargo_bin("dotmerge").unwrap();
-    sync.env("HOME", sandbox.home())
-        .arg("sync")
+    let mut sync = sandbox.dotmerge();
+    sync.arg("sync")
         .arg("--target")
         .arg("origin/main")
         .arg("--repo")
@@ -802,9 +767,8 @@ fn sync_rerun_moves_current_import_after_repo_side_state_before_refresh() {
 
     sandbox.run_jj(&["bookmark", "create", "origin/main"]);
 
-    let mut initial_sync = Command::cargo_bin("dotmerge").unwrap();
+    let mut initial_sync = sandbox.dotmerge();
     initial_sync
-        .env("HOME", sandbox.home())
         .arg("sync")
         .arg("--no-export")
         .arg("--target")
@@ -816,9 +780,8 @@ fn sync_rerun_moves_current_import_after_repo_side_state_before_refresh() {
     sandbox.run_jj(&["new", "@"]);
     write_file(&sandbox.home().join("foo"), "hello\n");
 
-    let mut add = Command::cargo_bin("dotmerge").unwrap();
-    add.env("HOME", sandbox.home())
-        .arg("add")
+    let mut add = sandbox.dotmerge();
+    add.arg("add")
         .arg("--repo")
         .arg(sandbox.repo())
         .arg("foo");
@@ -834,9 +797,8 @@ fn sync_rerun_moves_current_import_after_repo_side_state_before_refresh() {
         "expected a repo-side commit before rerunning sync"
     );
 
-    let mut rerun_sync = Command::cargo_bin("dotmerge").unwrap();
+    let mut rerun_sync = sandbox.dotmerge();
     rerun_sync
-        .env("HOME", sandbox.home())
         .arg("sync")
         .arg("--no-export")
         .arg("--target")
@@ -865,9 +827,8 @@ fn status_succeeds_when_tracked_repo_file_is_unreadable_but_unchanged() {
     let source = sandbox.home().join("managed/config.toml");
     write_file(&source, "theme = \"local\"\n");
 
-    let mut add = Command::cargo_bin("dotmerge").unwrap();
-    add.env("HOME", sandbox.home())
-        .arg("add")
+    let mut add = sandbox.dotmerge();
+    add.arg("add")
         .arg("--repo")
         .arg(sandbox.repo())
         .arg("managed/config.toml");
@@ -875,9 +836,8 @@ fn status_succeeds_when_tracked_repo_file_is_unreadable_but_unchanged() {
 
     sandbox.run_jj(&["desc", "-m", "add managed config"]);
 
-    let mut sync = Command::cargo_bin("dotmerge").unwrap();
-    sync.env("HOME", sandbox.home())
-        .arg("sync")
+    let mut sync = sandbox.dotmerge();
+    sync.arg("sync")
         .arg("--target")
         .arg("@")
         .arg("--repo")
@@ -889,9 +849,8 @@ fn status_succeeds_when_tracked_repo_file_is_unreadable_but_unchanged() {
     let unreadable_mode = original_mode & !0o444;
     fs::set_permissions(&repo_file, fs::Permissions::from_mode(unreadable_mode)).unwrap();
 
-    let mut status = Command::cargo_bin("dotmerge").unwrap();
+    let mut status = sandbox.dotmerge();
     status
-        .env("HOME", sandbox.home())
         .arg("status")
         .arg("--target")
         .arg("@")
@@ -913,9 +872,8 @@ fn status_reports_repo_dirty_after_first_byte_change_in_large_tracked_file() {
     let original_contents = "0123456789abcdef".repeat(16 * 1024);
     write_file(&source, &original_contents);
 
-    let mut add = Command::cargo_bin("dotmerge").unwrap();
-    add.env("HOME", sandbox.home())
-        .arg("add")
+    let mut add = sandbox.dotmerge();
+    add.arg("add")
         .arg("--repo")
         .arg(sandbox.repo())
         .arg("managed/large.bin");
@@ -923,9 +881,8 @@ fn status_reports_repo_dirty_after_first_byte_change_in_large_tracked_file() {
 
     sandbox.run_jj(&["desc", "-m", "add large tracked file"]);
 
-    let mut sync = Command::cargo_bin("dotmerge").unwrap();
-    sync.env("HOME", sandbox.home())
-        .arg("sync")
+    let mut sync = sandbox.dotmerge();
+    sync.arg("sync")
         .arg("--target")
         .arg("@")
         .arg("--repo")
@@ -937,9 +894,8 @@ fn status_reports_repo_dirty_after_first_byte_change_in_large_tracked_file() {
     modified_contents[0] ^= 0xff;
     fs::write(&repo_file, modified_contents).unwrap();
 
-    let mut status = Command::cargo_bin("dotmerge").unwrap();
+    let mut status = sandbox.dotmerge();
     status
-        .env("HOME", sandbox.home())
         .arg("status")
         .arg("--target")
         .arg("@")
@@ -964,9 +920,8 @@ fn status_repeated_twice_does_not_leave_a_stale_working_copy_lock() {
     // and then drops (without finish()) the LockedLocalWorkingCopy.  If the
     // lock file were not cleaned up on drop the second call would fail.
     for _ in 0..2 {
-        let mut cmd = Command::cargo_bin("dotmerge").unwrap();
-        cmd.env("HOME", sandbox.home())
-            .arg("status")
+        let mut cmd = sandbox.dotmerge();
+        cmd.arg("status")
             .arg("--target")
             .arg("@")
             .arg("--repo")
@@ -975,6 +930,301 @@ fn status_repeated_twice_does_not_leave_a_stale_working_copy_lock() {
             .success()
             .stdout(predicate::str::contains("repo working copy is not clean").not());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Config-file feature tests (proposal 0008)
+// ---------------------------------------------------------------------------
+
+/// Bullet 1: config supplies all three (repo, target, home).
+/// `dotmerge status` with no flags reads everything from the default config
+/// and behaves identically to passing the same values as flags.
+#[test]
+fn config_all_three_fields_status_runs_without_flags() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    // Write the config at the default path ($HOME/.config/dotmerge/config.toml).
+    let cfg_path = sandbox.default_config_path();
+    write_file(
+        &cfg_path,
+        &format!(
+            "repo = \"{}\"\ntarget = \"@\"\n",
+            sandbox.repo().display()
+        ),
+    );
+
+    // Without any --repo/--target flags the config should supply both.
+    sandbox
+        .dotmerge()
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("state:   up to date"));
+}
+
+/// Bullet 2: --repo and --target flags override the corresponding config values.
+#[test]
+fn config_flags_override_config_values() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    // Write a config pointing at a nonexistent (bogus) repo and a bogus target.
+    let cfg_path = sandbox.default_config_path();
+    write_file(
+        &cfg_path,
+        "repo = \"/nonexistent-bogus-repo\"\ntarget = \"bogus-target\"\n",
+    );
+
+    // The --repo and --target flags should win over the config values.
+    sandbox
+        .dotmerge()
+        .arg("status")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("--target")
+        .arg("@")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("state:   up to date"));
+}
+
+/// Bullet 3a: config with only `repo`; `dotmerge status` without `--target` errors.
+#[test]
+fn config_repo_only_status_requires_target_flag() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    let cfg_path = sandbox.default_config_path();
+    write_file(
+        &cfg_path,
+        &format!("repo = \"{}\"\n", sandbox.repo().display()),
+    );
+
+    sandbox
+        .dotmerge()
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--target is required"));
+}
+
+/// Bullet 3b: config with only `repo`; `dotmerge add` succeeds (add needs no target).
+#[test]
+fn config_repo_only_add_succeeds() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    write_file(&sandbox.home().join("foo"), "hello\n");
+
+    let cfg_path = sandbox.default_config_path();
+    write_file(
+        &cfg_path,
+        &format!("repo = \"{}\"\n", sandbox.repo().display()),
+    );
+
+    // add uses the configured repo and no target — should succeed.
+    sandbox
+        .dotmerge()
+        .arg("add")
+        .arg("foo")
+        .assert()
+        .success();
+
+    assert!(
+        sandbox.repo().join("foo").exists(),
+        "expected `foo` to be copied into the repo"
+    );
+}
+
+/// Bullet 4: no config, no --repo → errors with `--repo is required`.
+#[test]
+fn config_missing_repo_errors() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    // No config file, no --repo flag.
+    sandbox
+        .dotmerge()
+        .arg("status")
+        .arg("--target")
+        .arg("@")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--repo is required"));
+}
+
+/// Bullet 5a: `--config` pointing at a missing file errors.
+#[test]
+fn config_flag_missing_path_errors() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    sandbox
+        .dotmerge()
+        .arg("--config")
+        .arg("/tmp/dotmerge-test-missing-config-99999.toml")
+        .arg("status")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("--target")
+        .arg("@")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--config path does not exist"));
+}
+
+/// Bullet 5b: `DOTMERGE_CONFIG` pointing at a missing file errors.
+#[test]
+fn config_env_missing_path_errors() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    sandbox
+        .dotmerge()
+        .env("DOTMERGE_CONFIG", "/tmp/dotmerge-test-missing-env-99999.toml")
+        .arg("status")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("--target")
+        .arg("@")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("DOTMERGE_CONFIG path does not exist"));
+}
+
+/// Bullet 5c: default path missing is fine — existing tests already cover this
+/// (any test that passes --repo/--target without a config file), but this makes
+/// the no-config case explicit.
+#[test]
+fn config_default_path_absent_is_not_an_error() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    // No config file exists; --repo and --target supplied via flags.
+    sandbox
+        .dotmerge()
+        .arg("status")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("--target")
+        .arg("@")
+        .assert()
+        .success();
+}
+
+/// Bullet 6: unknown key in the TOML (via --config) errors.
+#[test]
+fn config_unknown_key_errors() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    // Write a config with a typo'd key; deny_unknown_fields must reject it.
+    let cfg_path = sandbox.root().join("bad_config.toml");
+    write_file(&cfg_path, "tagret = \"origin/main\"\n");
+
+    sandbox
+        .dotmerge()
+        .arg("--config")
+        .arg(&cfg_path)
+        .arg("status")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("--target")
+        .arg("@")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("failed to parse config file"));
+}
+
+/// Bullet 7: relative path in config `repo` errors with the "absolute or start with `~/`" message.
+#[test]
+fn config_relative_repo_path_errors() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    let cfg_path = sandbox.root().join("relative_config.toml");
+    write_file(&cfg_path, "repo = \"relative/path\"\ntarget = \"@\"\n");
+
+    sandbox
+        .dotmerge()
+        .arg("--config")
+        .arg(&cfg_path)
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "paths must be absolute or start with `~/`",
+        ));
+}
+
+/// Bullet 8: `~/` expansion in config — repo path starting with `~/` is
+/// resolved against the real $HOME (the sandbox home).
+/// The sandbox repo lives at `<tempdir>/repo`; since it is not under home we
+/// instead pass repo via `--repo` and exercise `~/` expansion via the `--repo`
+/// flag itself, which goes through the same `expand_path` code path.
+#[test]
+fn config_tilde_expansion_in_repo_path() {
+    let sandbox = TestSandbox::new();
+
+    // Place the repo inside the sandbox home so we can refer to it as ~/…
+    let repo_under_home = sandbox.home().join("myrepo");
+    let mut init = Command::new("jj");
+    init.current_dir(sandbox.root())
+        .env("HOME", sandbox.home())
+        .arg("git")
+        .arg("init")
+        .arg(&repo_under_home);
+    init.assert().success();
+
+    // Write a config whose `repo` uses `~/myrepo` (tilde-relative to $HOME).
+    let cfg_path = sandbox.root().join("tilde_config.toml");
+    write_file(&cfg_path, "repo = \"~/myrepo\"\ntarget = \"@\"\n");
+
+    // dotmerge should expand `~/myrepo` against the sandbox $HOME.
+    sandbox
+        .dotmerge()
+        .arg("--config")
+        .arg(&cfg_path)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("state:   up to date"));
+}
+
+/// Bullet 9: `--config` flag takes precedence over `DOTMERGE_CONFIG` env var.
+#[test]
+fn config_flag_wins_over_env_var() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    // flag_config: provides repo + target "@" (valid).
+    let flag_cfg = sandbox.root().join("flag_config.toml");
+    write_file(
+        &flag_cfg,
+        &format!(
+            "repo = \"{}\"\ntarget = \"@\"\n",
+            sandbox.repo().display()
+        ),
+    );
+
+    // env_config: provides a bogus repo so that if it is used the command will fail.
+    let env_cfg = sandbox.root().join("env_config.toml");
+    write_file(
+        &env_cfg,
+        "repo = \"/nonexistent-bogus-for-env-config\"\ntarget = \"@\"\n",
+    );
+
+    // With --config pointing at the valid config, the env var's bogus config must be ignored.
+    sandbox
+        .dotmerge()
+        .env("DOTMERGE_CONFIG", &env_cfg)
+        .arg("--config")
+        .arg(&flag_cfg)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("state:   up to date"));
 }
 
 struct TestSandbox {
@@ -1000,12 +1250,30 @@ impl TestSandbox {
         self.tempdir.path()
     }
 
+    /// Return the default config-file path relative to the sandbox home.
+    /// Matches the default-path logic in `src/config.rs`: `$HOME/.config/dotmerge/config.toml`.
+    fn default_config_path(&self) -> PathBuf {
+        self.home.join(".config").join("dotmerge").join("config.toml")
+    }
+
     fn home(&self) -> &Path {
         &self.home
     }
 
     fn repo(&self) -> &Path {
         &self.repo
+    }
+
+    /// Return a `Command` for the `dotmerge` binary with the sandbox `$HOME`
+    /// pre-set and the two config-discovery env vars scrubbed so that a real
+    /// `~/.config/dotmerge/config.toml` or `DOTMERGE_CONFIG` in the test
+    /// runner's environment cannot leak into the invocation.
+    fn dotmerge(&self) -> Command {
+        let mut cmd = Command::cargo_bin("dotmerge").unwrap();
+        cmd.env("HOME", self.home())
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("DOTMERGE_CONFIG");
+        cmd
     }
 
     fn init_repo(&self) {
