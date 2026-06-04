@@ -594,17 +594,12 @@ fn sync_merge_description_uses_hostname_and_target_bookmark() {
 
     write_file(&sandbox.home().join("foo"), "local\n");
     let mut add = sandbox.dotmerge();
-    add.env("HOSTNAME", "test-host")
-        .arg("add")
-        .arg("--repo")
-        .arg(sandbox.repo())
-        .arg("foo");
+    add.arg("add").arg("--repo").arg(sandbox.repo()).arg("foo");
     add.assert().success();
     sandbox.run_jj(&["desc", "-m", "add foo"]);
 
     let mut sync = sandbox.dotmerge();
-    sync.env("HOSTNAME", "test-host")
-        .arg("sync")
+    sync.arg("sync")
         .arg("--target")
         .arg("origin/main")
         .arg("--repo")
@@ -622,9 +617,12 @@ fn sync_merge_description_uses_hostname_and_target_bookmark() {
         ])
         .trim()
         .to_owned();
-    assert_eq!(
-        description,
-        "dotmerge: merge test-host changes into origin/main"
+    // Host comes from gethostname(2); assert the format and that the target
+    // label resolves to the bookmark name.
+    assert!(
+        description.starts_with("dotmerge: merge ")
+            && description.ends_with(" changes into origin/main"),
+        "unexpected description: {description}"
     );
 }
 
@@ -645,17 +643,12 @@ fn sync_merge_description_uses_target_short_id_when_unbookmarked() {
 
     write_file(&sandbox.home().join("foo"), "local\n");
     let mut add = sandbox.dotmerge();
-    add.env("HOSTNAME", "test-host")
-        .arg("add")
-        .arg("--repo")
-        .arg(sandbox.repo())
-        .arg("foo");
+    add.arg("add").arg("--repo").arg(sandbox.repo()).arg("foo");
     add.assert().success();
     sandbox.run_jj(&["desc", "-m", "add foo"]);
 
     let mut sync = sandbox.dotmerge();
-    sync.env("HOSTNAME", "test-host")
-        .arg("sync")
+    sync.arg("sync")
         .arg("--target")
         .arg(&target_short)
         .arg("--repo")
@@ -673,32 +666,30 @@ fn sync_merge_description_uses_target_short_id_when_unbookmarked() {
         ])
         .trim()
         .to_owned();
-    assert_eq!(
-        description,
-        format!("dotmerge: merge test-host changes into {target_short}")
+    // Host comes from gethostname(2); assert the format and that the target
+    // label falls back to the short commit id when unbookmarked.
+    assert!(
+        description.starts_with("dotmerge: merge ")
+            && description.ends_with(&format!(" changes into {target_short}")),
+        "unexpected description: {description}"
     );
 }
 
 #[test]
-fn sync_import_description_uses_unknown_host_when_hostname_missing() {
+fn sync_import_description_includes_host() {
     let sandbox = TestSandbox::new();
     sandbox.init_repo();
 
     write_file(&sandbox.home().join("foo"), "old\n");
     let mut add = sandbox.dotmerge();
-    add.env_remove("HOSTNAME")
-        .arg("add")
-        .arg("--repo")
-        .arg(sandbox.repo())
-        .arg("foo");
+    add.arg("add").arg("--repo").arg(sandbox.repo()).arg("foo");
     add.assert().success();
     sandbox.run_jj(&["desc", "-m", "add foo"]);
     sandbox.run_jj(&["bookmark", "create", "origin/main"]);
 
     write_file(&sandbox.home().join("foo"), "new\n");
     let mut sync = sandbox.dotmerge();
-    sync.env_remove("HOSTNAME")
-        .arg("sync")
+    sync.arg("sync")
         .arg("--no-export")
         .arg("--target")
         .arg("origin/main")
@@ -717,7 +708,13 @@ fn sync_import_description_uses_unknown_host_when_hostname_missing() {
         ])
         .trim()
         .to_owned();
-    assert_eq!(description, "dotmerge: import changes from unknown host");
+    // The host comes from gethostname(2); assert the shape and a real,
+    // non-fallback host rather than an injected value.
+    let host = description
+        .strip_prefix("dotmerge: import changes from ")
+        .unwrap_or_else(|| panic!("unexpected description: {description}"));
+    assert!(!host.is_empty());
+    assert_ne!(host, "unknown host");
 }
 
 #[test]
