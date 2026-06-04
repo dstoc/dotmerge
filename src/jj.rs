@@ -11,6 +11,8 @@ use jj_lib::conflicts::{
 };
 use jj_lib::files::FileMergeHunkLevel;
 use jj_lib::fileset::FilesetAliasesMap;
+use jj_lib::gitignore::GitIgnoreFile;
+use jj_lib::matchers::{EverythingMatcher, NothingMatcher};
 use jj_lib::merge::SameChange;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::RefTarget;
@@ -25,6 +27,7 @@ use jj_lib::settings::UserSettings;
 use jj_lib::time_util::DatePatternContext;
 use jj_lib::transaction::Transaction;
 use jj_lib::tree_merge::MergeOptions;
+use jj_lib::working_copy::SnapshotOptions;
 use jj_lib::workspace::{default_working_copy_factories, Workspace};
 use pollster::FutureExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -202,6 +205,12 @@ impl JjClient {
         repo.index()
             .is_ancestor(ancestor_commit.id(), descendant_commit.id())
             .context("failed to query jj ancestry")
+    }
+
+    pub(crate) fn is_working_copy_clean(&self) -> Result<bool> {
+        let (workspace, repo) = self.load_workspace_and_repo()?;
+        let current = self.resolve_commit_by_revset(&workspace, &repo, "@")?;
+        is_working_copy_clean_with_snapshot(&self.settings, &self.workspace_root, &current.tree())
     }
 
     fn load_workspace_and_repo(&self) -> Result<(Workspace, Arc<ReadonlyRepo>)> {
@@ -573,6 +582,15 @@ impl JjSession {
             .context("failed to query jj ancestry")
     }
 
+    pub(crate) fn is_working_copy_clean(&self) -> Result<bool> {
+        let current = self.resolve_commit_by_revset("@")?;
+        is_working_copy_clean_with_snapshot(
+            &self.settings,
+            self.workspace.workspace_root(),
+            &current.tree(),
+        )
+    }
+
     pub(crate) fn checkout_revision(&mut self, rev: &RevisionSummary) -> Result<()> {
         let commit = self.resolve_summary_to_commit(rev)?;
         self.tx
@@ -810,4 +828,40 @@ fn find_workspace_root(path: PathBuf) -> Result<PathBuf> {
         "could not find a jj workspace root from `{}`",
         start.display()
     ))
+}
+
+fn is_working_copy_clean_with_snapshot(
+    settings: &UserSettings,
+    workspace_root: &Path,
+    current_tree: &jj_lib::merged_tree::MergedTree,
+) -> Result<bool> {
+    let mut workspace = Workspace::load(
+        settings,
+        workspace_root,
+        &StoreFactories::default(),
+        &default_working_copy_factories(),
+    )
+    .with_context(|| {
+        format!(
+            "failed to load jj workspace at `{}` for working-copy snapshot",
+            workspace_root.display()
+        )
+    })?;
+    let mut locked_workspace = workspace
+        .start_working_copy_mutation()
+        .block_on()
+        .context("failed to start jj working-copy snapshot")?;
+    let snapshot_options = SnapshotOptions {
+        base_ignores: GitIgnoreFile::empty(),
+        progress: None,
+        start_tracking_matcher: &EverythingMatcher,
+        force_tracking_matcher: &NothingMatcher,
+        max_new_file_size: u64::MAX,
+    };
+    let (snapshot_tree, _) = locked_workspace
+        .locked_wc()
+        .snapshot(&snapshot_options)
+        .block_on()
+        .context("failed to snapshot jj working copy")?;
+    Ok(snapshot_tree.tree_ids_and_labels() == current_tree.tree_ids_and_labels())
 }

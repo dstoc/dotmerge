@@ -28,6 +28,9 @@ pub(crate) trait StatusSource {
         base: &RevisionSummary,
         current_import: Option<&RevisionSummary>,
     ) -> Result<ResumeState>;
+    fn working_copy_clean_hint(&self) -> Result<Option<bool>> {
+        Ok(None)
+    }
 }
 
 pub fn run(args: StatusArgs) -> Result<()> {
@@ -305,6 +308,10 @@ pub(crate) fn managed_paths(
 }
 
 pub(crate) fn is_working_copy_clean(source: &impl StatusSource, repo_path: &Path) -> Result<bool> {
+    if let Some(clean) = source.working_copy_clean_hint()? {
+        return Ok(clean);
+    }
+
     let current = source.current_revision()?;
     let tracked_paths = source.list_files(&current)?;
     let repo_paths = fs::list_repo_paths(repo_path)?;
@@ -367,6 +374,10 @@ impl StatusSource for JjClient {
     ) -> Result<ResumeState> {
         JjClient::resume_state(self, base, current_import)
     }
+
+    fn working_copy_clean_hint(&self) -> Result<Option<bool>> {
+        Ok(Some(JjClient::is_working_copy_clean(self)?))
+    }
 }
 
 impl StatusSource for JjSession {
@@ -412,6 +423,10 @@ impl StatusSource for JjSession {
         current_import: Option<&RevisionSummary>,
     ) -> Result<ResumeState> {
         JjSession::resume_state(self, base, current_import)
+    }
+
+    fn working_copy_clean_hint(&self) -> Result<Option<bool>> {
+        Ok(Some(JjSession::is_working_copy_clean(self)?))
     }
 }
 

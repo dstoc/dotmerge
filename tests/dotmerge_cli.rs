@@ -838,6 +838,99 @@ fn sync_rerun_moves_current_import_after_repo_side_state_before_refresh() {
     );
 }
 
+#[test]
+fn status_succeeds_when_tracked_repo_file_is_unreadable_but_unchanged() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    let source = sandbox.home().join("managed/config.toml");
+    write_file(&source, "theme = \"local\"\n");
+
+    let mut add = Command::cargo_bin("dotmerge").unwrap();
+    add.env("HOME", sandbox.home())
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("managed/config.toml");
+    add.assert().success();
+
+    sandbox.run_jj(&["desc", "-m", "add managed config"]);
+
+    let mut sync = Command::cargo_bin("dotmerge").unwrap();
+    sync.env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--target")
+        .arg("@")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    sync.assert().success();
+
+    let repo_file = sandbox.repo().join("managed/config.toml");
+    let original_mode = fs::metadata(&repo_file).unwrap().permissions().mode();
+    let unreadable_mode = original_mode & !0o444;
+    fs::set_permissions(&repo_file, fs::Permissions::from_mode(unreadable_mode)).unwrap();
+
+    let mut status = Command::cargo_bin("dotmerge").unwrap();
+    status
+        .env("HOME", sandbox.home())
+        .arg("status")
+        .arg("--target")
+        .arg("@")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    status.assert().success().stdout(
+        predicate::str::contains("repo working copy is not clean").not(),
+    );
+
+    fs::set_permissions(&repo_file, fs::Permissions::from_mode(original_mode)).unwrap();
+}
+
+#[test]
+fn status_reports_repo_dirty_after_first_byte_change_in_large_tracked_file() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    let source = sandbox.home().join("managed/large.bin");
+    let original_contents = "0123456789abcdef".repeat(16 * 1024);
+    write_file(&source, &original_contents);
+
+    let mut add = Command::cargo_bin("dotmerge").unwrap();
+    add.env("HOME", sandbox.home())
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("managed/large.bin");
+    add.assert().success();
+
+    sandbox.run_jj(&["desc", "-m", "add large tracked file"]);
+
+    let mut sync = Command::cargo_bin("dotmerge").unwrap();
+    sync.env("HOME", sandbox.home())
+        .arg("sync")
+        .arg("--target")
+        .arg("@")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    sync.assert().success();
+
+    let repo_file = sandbox.repo().join("managed/large.bin");
+    let mut modified_contents = fs::read(&repo_file).unwrap();
+    modified_contents[0] ^= 0xff;
+    fs::write(&repo_file, modified_contents).unwrap();
+
+    let mut status = Command::cargo_bin("dotmerge").unwrap();
+    status
+        .env("HOME", sandbox.home())
+        .arg("status")
+        .arg("--target")
+        .arg("@")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    status.assert().success().stdout(predicate::str::contains(
+        "repo working copy is not clean",
+    ));
+}
+
 struct TestSandbox {
     tempdir: TempDir,
     home: PathBuf,
