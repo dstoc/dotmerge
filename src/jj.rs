@@ -586,5 +586,11 @@ fn is_working_copy_clean_with_snapshot(
         .snapshot(&snapshot_options)
         .block_on()
         .context("failed to snapshot jj working copy")?;
+    // This is a read-only cleanliness check; we intentionally never call
+    // `locked_workspace.finish()`.  Dropping `LockedWorkspace` drops the inner
+    // `LockedLocalWorkingCopy`, whose `_lock: FileLock` field has a `Drop` impl
+    // (local_working_copy.rs / lock/unix.rs) that removes the `.jj/working_copy/
+    // working_copy.lock` file and releases the flock — no state is persisted and
+    // no lock file is left behind.
     Ok(snapshot_tree.tree_ids_and_labels() == current_tree.tree_ids_and_labels())
 }

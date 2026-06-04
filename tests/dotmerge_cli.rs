@@ -931,6 +931,33 @@ fn status_reports_repo_dirty_after_first_byte_change_in_large_tracked_file() {
     ));
 }
 
+// Regression test: dropping LockedWorkspace without calling finish() must
+// release the working-copy lock cleanly so a second snapshot (a second
+// `dotmerge status` invocation) can acquire the lock without hitting a
+// "working copy is locked" error.
+#[test]
+fn status_repeated_twice_does_not_leave_a_stale_working_copy_lock() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    // Run `dotmerge status` twice in a row on the same repo.
+    // Each invocation calls is_working_copy_clean_with_snapshot, which acquires
+    // and then drops (without finish()) the LockedLocalWorkingCopy.  If the
+    // lock file were not cleaned up on drop the second call would fail.
+    for _ in 0..2 {
+        let mut cmd = Command::cargo_bin("dotmerge").unwrap();
+        cmd.env("HOME", sandbox.home())
+            .arg("status")
+            .arg("--target")
+            .arg("@")
+            .arg("--repo")
+            .arg(sandbox.repo());
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains("repo working copy is not clean").not());
+    }
+}
+
 struct TestSandbox {
     tempdir: TempDir,
     home: PathBuf,
