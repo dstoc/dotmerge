@@ -10,7 +10,9 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn validate_add_source(input_path: &Path, home: &Path) -> Result<ValidatedAddSource> {
-    let source_path = resolve_home_path(input_path, home)?;
+    let cwd = std::env::current_dir()
+        .context("failed to determine the current working directory")?;
+    let source_path = resolve_home_path(input_path, home, &cwd)?;
     let metadata = fs::symlink_metadata(&source_path)
         .with_context(|| format!("failed to inspect source path `{}`", source_path.display()))
         .map_err(|err| match err.downcast::<std::io::Error>() {
@@ -247,13 +249,16 @@ pub fn export_home_entries(
     Ok(exported)
 }
 
-fn resolve_home_path(input_path: &Path, home: &Path) -> Result<PathBuf> {
+fn resolve_home_path(input_path: &Path, home: &Path, cwd: &Path) -> Result<PathBuf> {
     let expanded = if input_path.is_absolute() {
         input_path.to_path_buf()
     } else if let Ok(stripped) = input_path.strip_prefix("~") {
         home.join(stripped)
     } else {
-        home.join(input_path)
+        // A bare relative path is interpreted relative to the current working
+        // directory, like any other CLI tool — not relative to `$HOME`. The
+        // resolved location must still land inside `$HOME` (checked below).
+        cwd.join(input_path)
     };
 
     let normalized = normalize_absolute_path(&expanded)?;
@@ -483,7 +488,8 @@ mod tests {
         let tmp = TempDir::new()?;
         let home = tmp.path();
         let input = home.join("subdir/file.txt");
-        let result = resolve_home_path(&input, home)?;
+        // cwd is irrelevant for absolute inputs.
+        let result = resolve_home_path(&input, home, Path::new("/nowhere"))?;
         assert!(result.starts_with(home));
         assert_eq!(result, home.join("subdir/file.txt"));
         Ok(())
@@ -493,20 +499,35 @@ mod tests {
     fn resolve_tilde_prefix_expands_to_home() -> Result<()> {
         let tmp = TempDir::new()?;
         let home = tmp.path();
-        let result = resolve_home_path(Path::new("~/x"), home)?;
+        // cwd is irrelevant for `~/` inputs.
+        let result = resolve_home_path(Path::new("~/x"), home, Path::new("/nowhere"))?;
         assert!(result.starts_with(home));
         assert_eq!(result, home.join("x"));
         Ok(())
     }
 
     #[test]
-    fn resolve_bare_relative_path_resolves_under_home() -> Result<()> {
+    fn resolve_bare_relative_path_resolves_against_cwd_inside_home() -> Result<()> {
         let tmp = TempDir::new()?;
         let home = tmp.path();
-        let result = resolve_home_path(Path::new("x"), home)?;
-        assert!(result.starts_with(home));
-        assert_eq!(result, home.join("x"));
+        let cwd = home.join("sub/dir");
+        // A bare relative path is joined onto the cwd, not onto $HOME.
+        let result = resolve_home_path(Path::new("x"), home, &cwd)?;
+        assert_eq!(result, home.join("sub/dir/x"));
         Ok(())
+    }
+
+    #[test]
+    fn resolve_bare_relative_path_with_cwd_outside_home_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        // cwd is a sibling of home, so a bare relative path lands outside $HOME.
+        let cwd = home.join("../elsewhere");
+        let result = resolve_home_path(Path::new("x"), home, &cwd);
+        assert!(
+            result.is_err(),
+            "expected rejection when the cwd-relative path is outside home"
+        );
     }
 
     #[test]
@@ -514,7 +535,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         // ~/../outside lexically resolves to <home>/../outside which is outside home
-        let result = resolve_home_path(Path::new("~/../outside"), home);
+        let result = resolve_home_path(Path::new("~/../outside"), home, home);
         assert!(result.is_err(), "expected rejection for path escaping home via ~/../");
     }
 
@@ -524,7 +545,7 @@ mod tests {
         let home = tmp.path();
         // Construct an absolute path that goes outside: <home>/../outside
         let outside = home.join("../outside");
-        let result = resolve_home_path(&outside, home);
+        let result = resolve_home_path(&outside, home, home);
         assert!(result.is_err(), "expected rejection for absolute path outside home");
     }
 
@@ -532,8 +553,8 @@ mod tests {
     fn resolve_relative_dotdot_outside_home_rejected() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        // ../etc/passwd relative to home resolves outside
-        let result = resolve_home_path(Path::new("../etc/passwd"), home);
+        // ../etc/passwd relative to a cwd of home resolves outside home
+        let result = resolve_home_path(Path::new("../etc/passwd"), home, home);
         assert!(result.is_err(), "expected rejection for ../etc/passwd");
     }
 

@@ -496,7 +496,7 @@ Suggested behavior:
 
 When copying into the repo, `dotmerge add` should preserve executable bits and symlink identity. A managed symlink may point outside `$HOME`: `add` only requires the symlink's own location to be inside `$HOME`, and records the link verbatim rather than copying whatever it points to.
 
-`PATH` may be absolute or home-relative, as long as it resolves unambiguously inside `$HOME`.
+`PATH` may be absolute, `~/`-prefixed, or relative to the current working directory. A relative `PATH` is resolved against the directory `dotmerge` is invoked from, and the resolved location must land inside `$HOME` or `add` rejects it.
 
 `dotmerge add` should be explicit and narrow. It is how new local files enter the managed set.
 

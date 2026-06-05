@@ -67,7 +67,8 @@ pub struct AddArgs {
     #[arg(long)]
     pub repo: Option<PathBuf>,
 
-    /// One or more absolute or home-relative paths to admit into sync.
+    /// One or more paths to admit into sync. Relative paths resolve against the
+    /// current directory; each must resolve to a location inside $HOME.
     #[arg(value_name = "PATH", required = true)]
     pub paths: Vec<PathBuf>,
 }

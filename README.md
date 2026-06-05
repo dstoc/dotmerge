@@ -116,7 +116,8 @@ Admits one or more new local files into sync by copying them into the repo at
 their corresponding repo-relative paths. This is how a file that exists in
 `$HOME` but isn't tracked yet becomes managed. `add` preserves executable bits
 and symlink identity, and does not require a clean working copy. Paths may be
-absolute or home-relative as long as they resolve inside `$HOME`.
+absolute, `~/`-prefixed, or relative to the current directory; either way the
+resolved location must be inside `$HOME`.
 
 ## Workflow
 `dotmerge` output and recommended `jj` workflows are still being refined. Here are some recipes:

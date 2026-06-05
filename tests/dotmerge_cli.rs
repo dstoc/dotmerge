@@ -6,13 +6,15 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 #[test]
-fn add_accepts_home_relative_file_and_copies_into_repo_worktree() {
+fn add_accepts_cwd_relative_file_inside_home_and_copies_into_repo_worktree() {
     let sandbox = TestSandbox::new();
     let source = sandbox.home().join(".config/sway/config");
     write_file(&source, "theme = \"local\"\n");
 
     sandbox.init_repo();
 
+    // A bare relative path resolves against the current directory (the test
+    // helper defaults that to $HOME), so `.config/sway/config` lands inside it.
     let mut cmd = sandbox.dotmerge();
     cmd.arg("add")
         .arg("--repo")
@@ -40,6 +42,29 @@ fn add_rejects_path_outside_home() {
         .arg("--repo")
         .arg(sandbox.repo())
         .arg(&outside_path);
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("resolves outside `$HOME`"));
+}
+
+#[test]
+fn add_rejects_cwd_relative_path_resolving_outside_home() {
+    let sandbox = TestSandbox::new();
+    // A file that exists outside $HOME (next to it, under the repo dir).
+    let source = sandbox.repo().join("escaped.txt");
+    write_file(&source, "outside\n");
+
+    sandbox.init_repo();
+
+    // Run from the repo dir (outside $HOME) and reference the file relatively;
+    // it resolves to <repo>/escaped.txt, which is not inside $HOME.
+    let mut cmd = sandbox.dotmerge();
+    cmd.current_dir(sandbox.repo())
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("escaped.txt");
 
     cmd.assert()
         .failure()
@@ -1206,7 +1231,8 @@ fn config_repo_only_add_succeeds() {
         &format!("repo = \"{}\"\n", sandbox.repo().display()),
     );
 
-    // add uses the configured repo and no target — should succeed.
+    // add uses the configured repo and no target — should succeed. The bare
+    // relative path resolves against the cwd (defaulted to $HOME by the helper).
     sandbox
         .dotmerge()
         .arg("add")
@@ -1462,7 +1488,10 @@ impl TestSandbox {
         let mut cmd = Command::cargo_bin("dotmerge").unwrap();
         cmd.env("HOME", self.home())
             .env_remove("XDG_CONFIG_HOME")
-            .env_remove("DOTMERGE_CONFIG");
+            .env_remove("DOTMERGE_CONFIG")
+            // Default the working directory to $HOME so bare relative `add`
+            // paths resolve inside it; individual tests override as needed.
+            .current_dir(self.home());
         cmd
     }
 
