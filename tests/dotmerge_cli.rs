@@ -307,6 +307,33 @@ fn sync_on_fresh_empty_repo_records_last_sync_and_clears_current_import() {
 }
 
 #[test]
+fn sync_exports_moved_bookmarks_to_colocated_git_refs() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo_colocated();
+
+    let mut cmd = sandbox.dotmerge();
+    cmd.arg("sync")
+        .arg("--target")
+        .arg("@")
+        .arg("--repo")
+        .arg(sandbox.repo());
+
+    cmd.assert().success();
+
+    // jj records the bookmark move in its own view, but in a colocated repo
+    // the visible git ref under refs/heads/ only changes if we export.
+    let jj_target = sandbox
+        .jj_stdout(&["log", "-r", "last-sync", "--no-graph", "-T", "commit_id"])
+        .trim()
+        .to_string();
+    let git_target = git_ref_target(sandbox.repo(), "refs/heads/last-sync");
+    assert_eq!(
+        git_target, jj_target,
+        "colocated git ref `refs/heads/last-sync` should match jj's last-sync commit"
+    );
+}
+
+#[test]
 fn sync_commits_one_dotmerge_operation_in_op_log() {
     let sandbox = TestSandbox::new();
     sandbox.init_repo();
@@ -1305,6 +1332,17 @@ impl TestSandbox {
         cmd.assert().success();
     }
 
+    fn init_repo_colocated(&self) {
+        let mut cmd = Command::new("jj");
+        cmd.current_dir(self.root())
+            .env("HOME", self.home())
+            .arg("git")
+            .arg("init")
+            .arg("--colocate")
+            .arg(self.repo());
+        cmd.assert().success();
+    }
+
     fn run_jj(&self, args: &[&str]) {
         let mut cmd = Command::new("jj");
         cmd.current_dir(self.repo())
@@ -1336,6 +1374,23 @@ fn write_file(path: &Path, contents: &str) {
         fs::create_dir_all(parent).unwrap();
     }
     fs::write(path, contents).unwrap();
+}
+
+fn git_ref_target(repo: &Path, ref_name: &str) -> String {
+    let output = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(repo.join(".git"))
+        .arg("rev-parse")
+        .arg("--verify")
+        .arg(ref_name)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git rev-parse {ref_name} failed: stderr=\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
 fn assert_bookmark_present(home: &Path, repo: &Path, name: &str) {

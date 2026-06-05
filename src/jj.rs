@@ -16,7 +16,7 @@ use jj_lib::matchers::{EverythingMatcher, NothingMatcher};
 use jj_lib::merge::SameChange;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::RefTarget;
-use jj_lib::repo::{MutableRepo, ReadonlyRepo, StoreFactories};
+use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _, StoreFactories};
 use jj_lib::repo_path::{RepoPath, RepoPathBuf, RepoPathUiConverter};
 use jj_lib::revset::{
     parse, RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions, RevsetParseContext,
@@ -60,7 +60,12 @@ impl JjClient {
 
     pub(crate) fn begin(&self) -> Result<JjSession> {
         let (workspace, repo) = self.load_workspace_and_repo()?;
-        let tx = repo.start_transaction();
+        let mut tx = repo.start_transaction();
+        // In a colocated repo the user (or another tool) may have moved
+        // refs/heads/... out from under us since our last operation. Reflect
+        // any git-side ref changes into jj's view before we read or mutate, so
+        // we don't operate on a stale picture of the bookmarks.
+        import_git_refs(tx.repo_mut())?;
         Ok(JjSession {
             workspace,
             tx,
@@ -121,6 +126,43 @@ impl JjClient {
         )
     }
 
+}
+
+/// Reflect git-side ref changes into jj's view (`jj git import`).
+///
+/// No-op when the store isn't git-backed. Imports conservatively: it never
+/// abandons commits that became unreachable in git, so a stale or rewound git
+/// ref can't make us drop jj commits.
+fn import_git_refs(repo: &mut MutableRepo) -> Result<()> {
+    if jj_lib::git::get_git_backend(repo.store()).is_err() {
+        return Ok(());
+    }
+    let options = jj_lib::git::GitImportOptions {
+        auto_local_bookmark: false,
+        abandon_unreachable_commits: false,
+        remote_auto_track_bookmarks: HashMap::new(),
+    };
+    jj_lib::git::import_refs(repo, &options)
+        .block_on()
+        .context("failed to import refs from the colocated git repo")?;
+    Ok(())
+}
+
+/// Export jj's bookmarks/refs to the colocated git repo (`jj git export`).
+///
+/// No-op when the store isn't git-backed. Refs git refuses to update (e.g. a
+/// ref also changed on the git side, or left conflicted by the last import)
+/// are reported on stderr rather than aborting the operation.
+fn export_git_refs(repo: &mut MutableRepo) -> Result<()> {
+    if jj_lib::git::get_git_backend(repo.store()).is_err() {
+        return Ok(());
+    }
+    let stats = jj_lib::git::export_refs(repo)
+        .context("failed to export refs to the colocated git repo")?;
+    for (symbol, reason) in &stats.failed_bookmarks {
+        eprintln!("warning: could not export bookmark `{symbol}` to git: {reason}");
+    }
+    Ok(())
 }
 
 fn resume_state_for_commits(
@@ -380,6 +422,13 @@ impl JjSession {
         }
 
         let pending_checkout = self.pending_checkout.take();
+        // Push the bookmark/ref moves we just made out to the colocated git
+        // repo's refs/heads/... . jj records them in its own view on commit,
+        // but the visible git refs only change when we export. This must run
+        // while the transaction is still mutable (before `commit`); the export
+        // itself records the new "last exported" state, which `commit` then
+        // persists so the next export diffs correctly.
+        export_git_refs(self.tx.repo_mut())?;
         let committed_repo = self.tx.commit(message).block_on()?;
         if let Some(commit) = pending_checkout {
             self.workspace
