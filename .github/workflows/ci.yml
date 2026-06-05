@@ -24,12 +24,33 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    env:
+      # Pinned to match the jj-lib version in Cargo.toml: the integration tests
+      # drive the `jj` CLI to build repos that the dotmerge binary (jj-lib) then
+      # reads, so the on-disk formats must agree.
+      JJ_VERSION: "0.41.0"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install jj
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/jj-dl" "$RUNNER_TEMP/jj-bin"
+          url="https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL "$url" | tar -xz -C "$RUNNER_TEMP/jj-dl"
+          # Locate the binary regardless of whether it sits at the archive root.
+          bin="$(find "$RUNNER_TEMP/jj-dl" -type f -name jj | head -n1)"
+          if [ -z "$bin" ]; then
+            echo "::error::jj binary not found in archive from $url"
+            exit 1
+          fi
+          install -m755 "$bin" "$RUNNER_TEMP/jj-bin/jj"
+          echo "$RUNNER_TEMP/jj-bin" >> "$GITHUB_PATH"
+      - name: Verify jj
+        run: jj --version
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
