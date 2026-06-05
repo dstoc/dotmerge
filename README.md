@@ -177,6 +177,17 @@ jj bookmark move main --to @
 jj git push --tracked
 ```
 
+Add a new dotfile to an existing setup:
+```bash
+# start a fresh change first — `add` refuses to write onto last-sync
+jj new
+# admit the file (absolute, ~/-relative, or relative to the current dir)
+dotmerge add ~/.config/kitty/kitty.conf
+# record it in history, then sync it out
+jj commit -m "Add kitty config"
+dotmerge sync
+```
+
 ## Resolving conflicts
 
 A conflict means a managed path changed both in your local `$HOME` and in the
