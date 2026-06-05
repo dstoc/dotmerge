@@ -21,6 +21,11 @@ pub(crate) enum ImportPlacement {
     RewriteInPlace(Commit),
     ReplaceOnDisposableParent,
     ReplaceOnCurrent,
+    // `@` is a merge built on top of `current-import` (the import is one of
+    // `@`'s parents): a prepared or conflict-stopped sync. Refresh the import's
+    // tree in place — keeping its base parent — and let jj rebase the merge,
+    // preserving any conflict resolution recorded in it.
+    RefreshUnderMerge(Commit),
 }
 
 pub(crate) fn create_or_refresh_import(
@@ -151,7 +156,42 @@ pub(crate) fn create_or_refresh_import(
                     .set_local_bookmark_target("current-import".as_ref(), RefTarget::absent());
                 session.mark_dirty();
             }
-            return Ok(ImportOutcome { revision: current, imported });
+            return Ok(ImportOutcome {
+                revision: current,
+                imported,
+                resumed_merge: None,
+            });
+        }
+        ImportPlacement::RefreshUnderMerge(import_commit) => {
+            // Refresh the import's tree in place (keeping its base parent), then
+            // rebase descendants so the merge that sat on top of it follows.
+            // jj re-applies the merge's recorded resolution: an unchanged $HOME
+            // leaves the merge clean, a changed $HOME re-raises the conflict.
+            let refreshed = session
+                .repo_mut()
+                .rewrite_commit(&import_commit)
+                .set_tree(imported_tree)
+                .set_description(import_description.clone())
+                .write()
+                .block_on()
+                .context("failed to refresh imported commit under the prepared merge")?;
+            session
+                .repo_mut()
+                .rebase_descendants()
+                .block_on()
+                .context("failed to rebase the prepared merge after refreshing current-import")?;
+            session.repo_mut().set_local_bookmark_target(
+                "current-import".as_ref(),
+                RefTarget::normal(refreshed.id().clone()),
+            );
+            session.mark_dirty();
+            // `rebase_descendants` moved `@` to the rebased merge; reuse it.
+            let resumed_merge = session.current_revision()?;
+            return Ok(ImportOutcome {
+                revision: Revision::new(refreshed.id().clone(), "current-import"),
+                imported,
+                resumed_merge: Some(resumed_merge),
+            });
         }
         ImportPlacement::RewriteInPlace(import_commit) => {
             let commit = session
@@ -193,6 +233,7 @@ pub(crate) fn create_or_refresh_import(
     Ok(ImportOutcome {
         revision: Revision::new(commit.id().clone(), "current-import"),
         imported,
+        resumed_merge: None,
     })
 }
 
@@ -228,6 +269,11 @@ pub(crate) fn decide_import_placement(
     }
 
     if let Some(import_commit) = current_import {
+        if current_commit.parent_ids().len() >= 2
+            && current_commit.parent_ids().contains(import_commit.id())
+        {
+            return Ok(ImportPlacement::RefreshUnderMerge(import_commit.clone()));
+        }
         if is_direct_child_of(import_commit, current_commit) {
             return Ok(ImportPlacement::RewriteInPlace(import_commit.clone()));
         }
@@ -521,6 +567,49 @@ mod tests {
         assert!(matches!(
             placement,
             ImportPlacement::RewriteInPlace(ref commit) if commit.id() == current_import.id()
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn import_placement_refreshes_under_merge_when_import_is_a_merge_parent() -> Result<()> {
+        let fixture = TestRepo::init()?;
+        let root_id = fixture.repo.store().root_commit_id().clone();
+        let import_tree = tree_with_file(&fixture.repo, fixture.root(), "managed.txt", b"home")?;
+        let merge_tree = tree_with_file(&fixture.repo, fixture.root(), "managed.txt", b"merged")?;
+
+        let mut tx = fixture.repo.start_transaction();
+        let import = new_commit(&mut tx, vec![root_id.clone()], import_tree.clone(), "import")?;
+        let target = new_commit(&mut tx, vec![root_id], root_tree(&fixture.repo), "target")?;
+        // `@` is a merge whose parents are the import and the target.
+        let merge = new_commit(
+            &mut tx,
+            vec![import.id().clone(), target.id().clone()],
+            merge_tree.clone(),
+            "merge",
+        )?;
+
+        let imported_tree_id = import_tree
+            .tree_ids()
+            .as_resolved()
+            .cloned()
+            .context("import tree must be resolved")?;
+        let merge_tree_id = merge_tree
+            .tree_ids()
+            .as_resolved()
+            .cloned()
+            .context("merge tree must be resolved")?;
+
+        let placement = decide_import_placement(
+            fixture.repo.as_ref(),
+            &merge,
+            Some(&import),
+            &imported_tree_id,
+            &merge_tree_id,
+        )?;
+        assert!(matches!(
+            placement,
+            ImportPlacement::RefreshUnderMerge(ref commit) if commit.id() == import.id()
         ));
         Ok(())
     }

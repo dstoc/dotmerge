@@ -214,6 +214,15 @@ fn resume_state_for_commits(
         }
     }
 
+    // `@` is a merge built on top of `current-import` (the import is one of
+    // `@`'s parents): a prepared or conflict-stopped sync left here. Rerunning
+    // refreshes the import in place and rebases the merge, so this resumes.
+    if current_commit.parent_ids().len() >= 2
+        && current_commit.parent_ids().contains(import_commit.id())
+    {
+        return ResumeState::Resumable;
+    }
+
     ResumeState::Blocked {
         reason: format!(
             "`current-import` ({}) does not look like a dotmerge import on top of the current sync base\n\ninspect it with `jj log`, then either:\n  - reset it with `jj bookmark delete current-import`\n  - or move it onto the sync base before rerunning `dotmerge sync`",

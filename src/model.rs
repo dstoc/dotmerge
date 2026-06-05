@@ -183,6 +183,11 @@ impl SyncStatusSummary {
 pub(crate) struct ImportOutcome {
     pub(crate) revision: Revision,
     pub(crate) imported: Vec<FileStatusSummary>, // base -> $HOME delta; empty when $HOME has no drift
+    // Set when resuming a prepared/conflicted sync: `@` was already a merge on
+    // top of `current-import`, so refreshing the import in place rebased that
+    // merge. The rebased merge is carried here so sync reuses it instead of
+    // building a fresh one (which would discard any conflict resolution).
+    pub(crate) resumed_merge: Option<Revision>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

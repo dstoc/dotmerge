@@ -41,11 +41,26 @@ pub fn run(config_flag: Option<&std::path::Path>, args: SyncArgs) -> Result<()> 
 
     let managed_paths = status::managed_paths(&session, &target)?;
     let imported = import::create_or_refresh_import(&mut session, &base, &home, &managed_paths)?;
-    let merged = merge::merge_revisions(&mut session, &imported.revision, &target)?;
-    let current = session.current_revision()?;
-    if !merged.revision().same(&current) {
-        session.checkout_revision(merged.revision())?;
-    }
+    let merged = match imported.resumed_merge.clone() {
+        // Resuming a prepared/conflicted sync: the import refresh already rebased
+        // the existing merge onto it, preserving any resolution. Reuse it rather
+        // than building a fresh merge that would re-introduce the conflict. The
+        // rebase moved `@` in the op view but not the on-disk working copy, so a
+        // checkout is required to re-materialize it (the same-id fast path below
+        // would otherwise skip it and leave the working copy stale).
+        Some(revision) => {
+            session.checkout_revision(&revision)?;
+            MergeOutcome::Merged { revision }
+        }
+        None => {
+            let merged = merge::merge_revisions(&mut session, &imported.revision, &target)?;
+            let current = session.current_revision()?;
+            if !merged.revision().same(&current) {
+                session.checkout_revision(merged.revision())?;
+            }
+            merged
+        }
+    };
 
     if session.has_conflicts(merged.revision())? {
         // Persist the conflicted merge and `current-import` so the user can

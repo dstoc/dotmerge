@@ -450,8 +450,8 @@ Suggested behavior:
    - if that refreshed import would be tree-identical to the repo-side parent state, abandon `current-import` and reuse the repo-side state directly
 6. Merge the prepared import state with the target revision.
    - if the target revision is already an ancestor of the prepared state, reuse that prepared state directly instead of creating a merge commit
-7. If merge conflicts exist, stop and report them, leaving any non-redundant `current-import` in place.
-8. If the user later resolves those conflicts in jj and reruns `dotmerge sync`, `dotmerge` should normalize and refresh `current-import` again from the latest managed home state and recompute the merge.
+7. If merge conflicts exist, stop and report them. Persist the conflicted merge at `@` and leave `current-import` in place (it remains a parent of that merge) so the prepared state survives for the user to resolve. `last-sync` does not move.
+8. If the user later resolves those conflicts in jj and reruns `dotmerge sync`, the prepared merge at `@` — a merge whose parent is `current-import` — is itself a resumable shape. `dotmerge` refreshes `current-import` in place from the latest managed home state (keeping its base parent) and rebases the prepared merge onto it, rather than building a fresh merge. Because jj re-applies the merge's recorded resolution, an unchanged `$HOME` keeps the merge clean and export proceeds, while a `$HOME` that changed the conflicting path re-raises the conflict to be resolved again.
 9. If the merge result is clean, export it to `$HOME`.
 10. Only after successful export, move `last-sync` to the exported revision.
 11. Clear `current-import` if it still exists.
@@ -638,10 +638,10 @@ On initial sync, this should still be treated as a normal jj merge conflict. Onl
 
 When rerun after conflict resolution, `dotmerge sync` should:
 
-- locate `current-import`
-- refresh it from the current managed `$HOME` state
-- recompute the merge against the requested target
-- stop again if new conflicts appear
+- locate `current-import` and the prepared merge that sits on top of it at `@`
+- refresh `current-import` in place from the current managed `$HOME` state, keeping its base parent
+- rebase the prepared merge onto the refreshed import rather than building a fresh merge, so the recorded resolution is preserved
+- stop again if the rebase re-raises a conflict (which happens when `$HOME` changed the conflicting path since the resolution)
 - otherwise continue to export
 
 The user is expected to resolve conflicts in jj and then rerun `dotmerge sync`.

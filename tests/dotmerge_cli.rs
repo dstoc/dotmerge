@@ -384,6 +384,99 @@ fn sync_conflict_persists_current_import_and_conflicted_merge() {
     assert_bookmark_absent(sandbox.home(), sandbox.repo(), "last-sync");
 }
 
+// Shared setup: drive a sync to a conflict stop and return the sandbox left at
+// the conflicted merge (current-import set, `@` conflicted, no last-sync).
+fn sandbox_stopped_at_conflict() -> TestSandbox {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    write_file(&sandbox.repo().join("foo"), "from-target\n");
+    sandbox.run_jj(&["desc", "-m", "target foo"]);
+    sandbox.run_jj(&["bookmark", "create", "origin/main"]);
+    sandbox.run_jj(&["new", "root()"]);
+
+    write_file(&sandbox.home().join("foo"), "from-home\n");
+
+    let mut cmd = sandbox.dotmerge();
+    cmd.arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    cmd.assert().failure();
+    sandbox
+}
+
+#[test]
+fn sync_resumes_after_conflict_resolved_and_exports() {
+    let sandbox = sandbox_stopped_at_conflict();
+
+    // Resolve the conflict at `@` and let jj snapshot it into the merge commit.
+    write_file(&sandbox.repo().join("foo"), "resolved\n");
+    sandbox.run_jj(&["status"]);
+
+    // Rerun: the import is refreshed in place, the resolved merge is reused, and
+    // (since $HOME is unchanged) it stays clean and exports.
+    let mut rerun = sandbox.dotmerge();
+    rerun
+        .arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    rerun.assert().success();
+
+    assert_bookmark_present(sandbox.home(), sandbox.repo(), "last-sync");
+    assert_bookmark_absent(sandbox.home(), sandbox.repo(), "current-import");
+    assert_eq!(
+        fs::read_to_string(sandbox.home().join("foo")).unwrap(),
+        "resolved\n",
+        "the resolved merge content should be exported to $HOME"
+    );
+}
+
+#[test]
+fn sync_reraises_conflict_when_home_changes_after_resolution() {
+    let sandbox = sandbox_stopped_at_conflict();
+
+    // Resolve and snapshot, but then change $HOME so the refreshed import no
+    // longer agrees with the recorded resolution.
+    write_file(&sandbox.repo().join("foo"), "resolved\n");
+    sandbox.run_jj(&["status"]);
+    write_file(&sandbox.home().join("foo"), "home-changed\n");
+
+    let mut rerun = sandbox.dotmerge();
+    rerun
+        .arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+    rerun
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "merge produced jj conflicts at `@`",
+        ));
+
+    // Still resumable: current-import stays, last-sync stays put, and the
+    // working copy is the conflicted merge again (not stale).
+    assert_bookmark_present(sandbox.home(), sandbox.repo(), "current-import");
+    assert_bookmark_absent(sandbox.home(), sandbox.repo(), "last-sync");
+    let at_is_conflict = sandbox
+        .jj_stdout(&[
+            "log",
+            "-r",
+            "@",
+            "--no-graph",
+            "-T",
+            "if(conflict, \"yes\", \"no\")",
+        ])
+        .trim()
+        .to_string();
+    assert_eq!(at_is_conflict, "yes", "expected `@` to re-raise the conflict");
+}
+
 #[test]
 fn sync_commits_one_dotmerge_operation_in_op_log() {
     let sandbox = TestSandbox::new();
