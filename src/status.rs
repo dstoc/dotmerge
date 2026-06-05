@@ -133,10 +133,11 @@ fn collect_with_repo_clean(
     summary.target_differs_from_base =
         !target_already_applied && !summary.target_changes.is_empty();
 
-    if let Some(import_revision) = current_import.revision.as_ref() {
-        if matches!(resume_state, ResumeState::Resumable) && !current.same(import_revision) {
-            summary.prepared = Some(current.to_summary());
-        }
+    if let Some(import_revision) = current_import.revision.as_ref()
+        && matches!(resume_state, ResumeState::Resumable)
+        && !current.same(import_revision)
+    {
+        summary.prepared = Some(current.to_summary());
     }
 
     summary.has_conflicts = source.has_conflicts(&current)?;
@@ -233,13 +234,13 @@ pub fn print_summary(summary: &SyncStatusSummary) {
     }
 
     // @ line — only for MergePrepared
-    if matches!(summary.state, SyncState::MergePrepared) {
-        if let Some(prepared) = &summary.prepared {
-            println!(
-                "@:       {}   (merge of import + target)",
-                prepared.short_id()
-            );
-        }
+    if matches!(summary.state, SyncState::MergePrepared)
+        && let Some(prepared) = &summary.prepared
+    {
+        println!(
+            "@:       {}   (merge of import + target)",
+            prepared.short_id()
+        );
     }
 
     // repo line

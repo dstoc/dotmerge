@@ -165,6 +165,7 @@ fn export_git_refs(repo: &mut MutableRepo) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resume_state_for_commits(
     base: &Revision,
     current: &Revision,
@@ -204,14 +205,12 @@ fn resume_state_for_commits(
         return ResumeState::Resumable;
     }
 
-    if current_is_disposable {
-        if let Some(current_parent) = current_commit.parent_ids().first() {
-            if import_commit.parent_ids().len() == 1
-                && import_commit.parent_ids()[0] == *current_parent
-            {
-                return ResumeState::Resumable;
-            }
-        }
+    if current_is_disposable
+        && let Some(current_parent) = current_commit.parent_ids().first()
+        && import_commit.parent_ids().len() == 1
+        && import_commit.parent_ids()[0] == *current_parent
+    {
+        return ResumeState::Resumable;
     }
 
     // `@` is a merge built on top of `current-import` (the import is one of

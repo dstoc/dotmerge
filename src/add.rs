@@ -69,31 +69,31 @@ fn ensure_addable_working_copy(client: &JjClient, target: Option<&str>) -> Resul
     let session = client.begin()?;
     let current = session.current_revision()?;
 
-    if let Some(last_sync) = session.bookmark_summary("last-sync")?.revision {
-        if session.is_ancestor(&current, &last_sync)? {
-            return Err(anyhow!(
-                "`@` is at or below `last-sync`, so `dotmerge add` would rewrite already-synced history.\n\nstart a fresh change first (`jj new`), then rerun `dotmerge add`."
-            ));
-        }
+    if let Some(last_sync) = session.bookmark_summary("last-sync")?.revision
+        && session.is_ancestor(&current, &last_sync)?
+    {
+        return Err(anyhow!(
+            "`@` is at or below `last-sync`, so `dotmerge add` would rewrite already-synced history.\n\nstart a fresh change first (`jj new`), then rerun `dotmerge add`."
+        ));
     }
 
-    if let Some(current_import) = session.bookmark_summary("current-import")?.revision {
-        if current.same(&current_import) {
-            return Err(anyhow!(
-                "`@` is `current-import`, so `dotmerge add` would pollute the in-progress import.\n\nstart a fresh change first (`jj new`), then rerun `dotmerge add`."
-            ));
-        }
+    if let Some(current_import) = session.bookmark_summary("current-import")?.revision
+        && current.same(&current_import)
+    {
+        return Err(anyhow!(
+            "`@` is `current-import`, so `dotmerge add` would pollute the in-progress import.\n\nstart a fresh change first (`jj new`), then rerun `dotmerge add`."
+        ));
     }
 
     if let Some(target) = target {
         // The configured target may not resolve yet (e.g. during bootstrap
         // before it exists); a target we can't resolve simply isn't checked.
-        if let Ok(target_rev) = session.resolve_rev(target) {
-            if session.is_ancestor(&current, &target_rev)? {
-                return Err(anyhow!(
-                    "`@` is at or below the target `{target}`, so `dotmerge add` would rewrite target history.\n\nstart a fresh change first (`jj new`), then rerun `dotmerge add`."
-                ));
-            }
+        if let Ok(target_rev) = session.resolve_rev(target)
+            && session.is_ancestor(&current, &target_rev)?
+        {
+            return Err(anyhow!(
+                "`@` is at or below the target `{target}`, so `dotmerge add` would rewrite target history.\n\nstart a fresh change first (`jj new`), then rerun `dotmerge add`."
+            ));
         }
     }
 
