@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 
 /// The subset of configuration that can be supplied via the config file.
@@ -24,8 +24,7 @@ fn default_config_path() -> Result<PathBuf> {
         PathBuf::from(xdg)
     } else {
         // Fall back to the real $HOME.
-        let home = std::env::var_os("HOME")
-            .ok_or_else(|| anyhow!("$HOME is not set"))?;
+        let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("$HOME is not set"))?;
         PathBuf::from(home).join(".config")
     };
 
@@ -92,8 +91,7 @@ pub(crate) fn expand_path(raw: &str) -> Result<PathBuf> {
         return Ok(PathBuf::from(raw));
     }
     if let Some(rest) = raw.strip_prefix("~/") {
-        let home = std::env::var_os("HOME")
-            .ok_or_else(|| anyhow!("$HOME is not set"))?;
+        let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("$HOME is not set"))?;
         return Ok(PathBuf::from(home).join(rest));
     }
     Err(anyhow!(
@@ -348,7 +346,8 @@ target = "origin/main"
             std::env::remove_var("DOTMERGE_CONFIG");
         }
         assert!(
-            err.to_string().contains("DOTMERGE_CONFIG path does not exist"),
+            err.to_string()
+                .contains("DOTMERGE_CONFIG path does not exist"),
             "unexpected error: {err}"
         );
     }
@@ -452,11 +451,7 @@ target = "origin/main"
         let cfg_path = tmp.path().join("config.toml");
         let repo_dir = tmp.path().join("repo");
         std::fs::create_dir_all(&repo_dir).unwrap();
-        std::fs::write(
-            &cfg_path,
-            format!("repo = \"{}\"\n", repo_dir.display()),
-        )
-        .unwrap();
+        std::fs::write(&cfg_path, format!("repo = \"{}\"\n", repo_dir.display())).unwrap();
 
         let err = resolve(Some(&cfg_path), None, None, None, true).unwrap_err();
         assert!(

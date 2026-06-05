@@ -231,10 +231,7 @@ fn status_reports_target_already_applied_without_target_diff_details() {
     write_file(&sandbox.home().join("foo"), "hello\n");
 
     let mut add = sandbox.dotmerge();
-    add.arg("add")
-        .arg("--repo")
-        .arg(sandbox.repo())
-        .arg("foo");
+    add.arg("add").arg("--repo").arg(sandbox.repo()).arg("foo");
     add.assert().success();
 
     sandbox.run_jj(&["desc", "-m", "add foo"]);
@@ -273,10 +270,7 @@ fn status_and_sync_block_unrelated_current_import_without_moving_bookmarks() {
 
     write_file(&sandbox.home().join("foo"), "local\n");
     let mut add = sandbox.dotmerge();
-    add.arg("add")
-        .arg("--repo")
-        .arg(sandbox.repo())
-        .arg("foo");
+    add.arg("add").arg("--repo").arg(sandbox.repo()).arg("foo");
     add.assert().success();
     sandbox.run_jj(&["desc", "-m", "add foo"]);
 
@@ -309,7 +303,14 @@ fn status_and_sync_block_unrelated_current_import_without_moving_bookmarks() {
         .trim()
         .to_owned();
     let current_import_before = sandbox
-        .jj_stdout(&["log", "-r", "current-import", "--no-graph", "-T", "commit_id"])
+        .jj_stdout(&[
+            "log",
+            "-r",
+            "current-import",
+            "--no-graph",
+            "-T",
+            "commit_id",
+        ])
         .trim()
         .to_owned();
 
@@ -348,7 +349,14 @@ fn status_and_sync_block_unrelated_current_import_without_moving_bookmarks() {
         .trim()
         .to_owned();
     let current_import_after = sandbox
-        .jj_stdout(&["log", "-r", "current-import", "--no-graph", "-T", "commit_id"])
+        .jj_stdout(&[
+            "log",
+            "-r",
+            "current-import",
+            "--no-graph",
+            "-T",
+            "commit_id",
+        ])
         .trim()
         .to_owned();
 
@@ -510,11 +518,9 @@ fn sync_conflict_persists_current_import_and_conflicted_merge() {
         .arg("--repo")
         .arg(sandbox.repo());
 
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "merge produced jj conflicts at `@`",
-        ));
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "merge produced jj conflicts at `@`",
+    ));
 
     // The conflicted state must be persisted for the user to resolve and rerun,
     // not discarded with the transaction.
@@ -607,12 +613,9 @@ fn sync_reraises_conflict_when_home_changes_after_resolution() {
         .arg("origin/main")
         .arg("--repo")
         .arg(sandbox.repo());
-    rerun
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "merge produced jj conflicts at `@`",
-        ));
+    rerun.assert().failure().stderr(predicate::str::contains(
+        "merge produced jj conflicts at `@`",
+    ));
 
     // Still resumable: current-import stays, last-sync stays put, and the
     // working copy is the conflicted merge again (not stale).
@@ -629,7 +632,10 @@ fn sync_reraises_conflict_when_home_changes_after_resolution() {
         ])
         .trim()
         .to_string();
-    assert_eq!(at_is_conflict, "yes", "expected `@` to re-raise the conflict");
+    assert_eq!(
+        at_is_conflict, "yes",
+        "expected `@` to re-raise the conflict"
+    );
 }
 
 #[test]
@@ -654,7 +660,10 @@ fn sync_commits_one_dotmerge_operation_in_op_log() {
     cmd.assert().success();
 
     let op_log = sandbox.jj_stdout(&["op", "log", "-T", "description.first_line() ++ \"\\n\""]);
-    let dotmerge_ops = op_log.lines().filter(|line| line.contains("dotmerge")).count();
+    let dotmerge_ops = op_log
+        .lines()
+        .filter(|line| line.contains("dotmerge"))
+        .count();
     assert_eq!(
         dotmerge_ops, 1,
         "expected one jj operation for `dotmerge sync`, got:\n{op_log}"
@@ -728,7 +737,14 @@ fn sync_export_failure_leaves_last_sync_and_current_import_unchanged() {
         .trim()
         .to_owned();
     let current_import_before = sandbox
-        .jj_stdout(&["log", "-r", "current-import", "--no-graph", "-T", "commit_id"])
+        .jj_stdout(&[
+            "log",
+            "-r",
+            "current-import",
+            "--no-graph",
+            "-T",
+            "commit_id",
+        ])
         .trim()
         .to_owned();
 
@@ -755,7 +771,14 @@ fn sync_export_failure_leaves_last_sync_and_current_import_unchanged() {
         .trim()
         .to_owned();
     let current_import_after = sandbox
-        .jj_stdout(&["log", "-r", "current-import", "--no-graph", "-T", "commit_id"])
+        .jj_stdout(&[
+            "log",
+            "-r",
+            "current-import",
+            "--no-graph",
+            "-T",
+            "commit_id",
+        ])
         .trim()
         .to_owned();
 
@@ -813,10 +836,7 @@ fn sync_reuses_existing_added_revision_as_import_ancestor() {
     write_file(&sandbox.home().join("foo"), "hello\n");
 
     let mut add = sandbox.dotmerge();
-    add.arg("add")
-        .arg("--repo")
-        .arg(sandbox.repo())
-        .arg("foo");
+    add.arg("add").arg("--repo").arg(sandbox.repo()).arg("foo");
     add.assert().success();
 
     sandbox.run_jj(&["desc", "-m", "adding foo"]);
@@ -860,10 +880,7 @@ fn sync_reuses_import_without_merge_when_target_is_ancestor() {
     write_file(&sandbox.home().join("foo"), "hello\n");
 
     let mut add = sandbox.dotmerge();
-    add.arg("add")
-        .arg("--repo")
-        .arg(sandbox.repo())
-        .arg("foo");
+    add.arg("add").arg("--repo").arg(sandbox.repo()).arg("foo");
     add.assert().success();
 
     sandbox.run_jj(&["desc", "-m", "adding foo"]);
@@ -1066,10 +1083,7 @@ fn sync_stops_managing_target_file_deleted_in_at() {
     write_file(&sandbox.home().join("foo"), "hello\n");
 
     let mut add = sandbox.dotmerge();
-    add.arg("add")
-        .arg("--repo")
-        .arg(sandbox.repo())
-        .arg("foo");
+    add.arg("add").arg("--repo").arg(sandbox.repo()).arg("foo");
     add.assert().success();
 
     sandbox.run_jj(&["desc", "-m", "add foo"]);
@@ -1119,10 +1133,7 @@ fn sync_rerun_moves_current_import_after_repo_side_state_before_refresh() {
     write_file(&sandbox.home().join("foo"), "hello\n");
 
     let mut add = sandbox.dotmerge();
-    add.arg("add")
-        .arg("--repo")
-        .arg(sandbox.repo())
-        .arg("foo");
+    add.arg("add").arg("--repo").arg(sandbox.repo()).arg("foo");
     add.assert().success();
     sandbox.run_jj(&["desc", "-m", "adds foo"]);
 
@@ -1194,9 +1205,10 @@ fn status_succeeds_when_tracked_repo_file_is_unreadable_but_unchanged() {
         .arg("@")
         .arg("--repo")
         .arg(sandbox.repo());
-    status.assert().success().stdout(
-        predicate::str::contains("repo working copy is not clean").not(),
-    );
+    status
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("repo working copy is not clean").not());
 
     fs::set_permissions(&repo_file, fs::Permissions::from_mode(original_mode)).unwrap();
 }
@@ -1239,9 +1251,10 @@ fn status_reports_repo_dirty_after_first_byte_change_in_large_tracked_file() {
         .arg("@")
         .arg("--repo")
         .arg(sandbox.repo());
-    status.assert().success().stdout(predicate::str::contains(
-        "repo working copy is not clean",
-    ));
+    status
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("repo working copy is not clean"));
 }
 
 // Regression test: dropping LockedWorkspace without calling finish() must
@@ -1286,10 +1299,7 @@ fn config_all_three_fields_status_runs_without_flags() {
     let cfg_path = sandbox.default_config_path();
     write_file(
         &cfg_path,
-        &format!(
-            "repo = \"{}\"\ntarget = \"@\"\n",
-            sandbox.repo().display()
-        ),
+        &format!("repo = \"{}\"\ntarget = \"@\"\n", sandbox.repo().display()),
     );
 
     // Without any --repo/--target flags the config should supply both.
@@ -1363,12 +1373,7 @@ fn config_repo_only_add_succeeds() {
 
     // add uses the configured repo and no target — should succeed. The bare
     // relative path resolves against the cwd (defaulted to $HOME by the helper).
-    sandbox
-        .dotmerge()
-        .arg("add")
-        .arg("foo")
-        .assert()
-        .success();
+    sandbox.dotmerge().arg("add").arg("foo").assert().success();
 
     assert!(
         sandbox.repo().join("foo").exists(),
@@ -1421,7 +1426,10 @@ fn config_env_missing_path_errors() {
 
     sandbox
         .dotmerge()
-        .env("DOTMERGE_CONFIG", "/tmp/dotmerge-test-missing-env-99999.toml")
+        .env(
+            "DOTMERGE_CONFIG",
+            "/tmp/dotmerge-test-missing-env-99999.toml",
+        )
         .arg("status")
         .arg("--repo")
         .arg(sandbox.repo())
@@ -1429,7 +1437,9 @@ fn config_env_missing_path_errors() {
         .arg("@")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("DOTMERGE_CONFIG path does not exist"));
+        .stderr(predicate::str::contains(
+            "DOTMERGE_CONFIG path does not exist",
+        ));
 }
 
 /// Bullet 5c: default path missing is fine — existing tests already cover this
@@ -1541,10 +1551,7 @@ fn config_flag_wins_over_env_var() {
     let flag_cfg = sandbox.root().join("flag_config.toml");
     write_file(
         &flag_cfg,
-        &format!(
-            "repo = \"{}\"\ntarget = \"@\"\n",
-            sandbox.repo().display()
-        ),
+        &format!("repo = \"{}\"\ntarget = \"@\"\n", sandbox.repo().display()),
     );
 
     // env_config: provides a bogus repo so that if it is used the command will fail.
@@ -1599,7 +1606,10 @@ impl TestSandbox {
     /// Return the default config-file path relative to the sandbox home.
     /// Matches the default-path logic in `src/config.rs`: `$HOME/.config/dotmerge/config.toml`.
     fn default_config_path(&self) -> PathBuf {
-        self.home.join(".config").join("dotmerge").join("config.toml")
+        self.home
+            .join(".config")
+            .join("dotmerge")
+            .join("config.toml")
     }
 
     fn home(&self) -> &Path {

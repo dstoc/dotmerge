@@ -3,7 +3,7 @@ use crate::jj::JjSession;
 use crate::model::{FileStatusSummary, ImportOutcome, ManagedEntry, Revision};
 use crate::status;
 use crate::util;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use jj_lib::backend::TreeId;
 use jj_lib::backend::{CopyId, TreeValue};
 use jj_lib::commit::Commit;
@@ -45,12 +45,7 @@ pub(crate) fn create_or_refresh_import(
             .tree_ids()
             .as_resolved()
             .cloned()
-            .ok_or_else(|| {
-                anyhow!(
-                    "base revision `{}` must have a resolved tree",
-                    base.label()
-                )
-            })?;
+            .ok_or_else(|| anyhow!("base revision `{}` must have a resolved tree", base.label()))?;
 
         let mut builder = TreeBuilder::new(repo.store().clone(), base_tree_id);
         for path in managed_paths {
@@ -148,83 +143,82 @@ pub(crate) fn create_or_refresh_import(
     let imported = compute_home_delta(session, base, home_state, managed_paths)?;
 
     let import_description = import_description();
-    let commit = match placement {
-        ImportPlacement::ReuseRepoSide => {
-            if current_import.exists {
+    let commit =
+        match placement {
+            ImportPlacement::ReuseRepoSide => {
+                if current_import.exists {
+                    session
+                        .repo_mut()
+                        .set_local_bookmark_target("current-import".as_ref(), RefTarget::absent());
+                    session.mark_dirty();
+                }
+                return Ok(ImportOutcome {
+                    revision: current,
+                    imported,
+                    resumed_merge: None,
+                });
+            }
+            ImportPlacement::RefreshUnderMerge(import_commit) => {
+                // Refresh the import's tree in place (keeping its base parent), then
+                // rebase descendants so the merge that sat on top of it follows.
+                // jj re-applies the merge's recorded resolution: an unchanged $HOME
+                // leaves the merge clean, a changed $HOME re-raises the conflict.
+                let refreshed = session
+                    .repo_mut()
+                    .rewrite_commit(&import_commit)
+                    .set_tree(imported_tree)
+                    .set_description(import_description.clone())
+                    .write()
+                    .block_on()
+                    .context("failed to refresh imported commit under the prepared merge")?;
+                session.repo_mut().rebase_descendants().block_on().context(
+                    "failed to rebase the prepared merge after refreshing current-import",
+                )?;
+                session.repo_mut().set_local_bookmark_target(
+                    "current-import".as_ref(),
+                    RefTarget::normal(refreshed.id().clone()),
+                );
+                session.mark_dirty();
+                // `rebase_descendants` moved `@` to the rebased merge; reuse it.
+                let resumed_merge = session.current_revision()?;
+                return Ok(ImportOutcome {
+                    revision: Revision::new(refreshed.id().clone(), "current-import"),
+                    imported,
+                    resumed_merge: Some(resumed_merge),
+                });
+            }
+            ImportPlacement::RewriteInPlace(import_commit) => {
+                let commit = session
+                    .repo_mut()
+                    .rewrite_commit(&import_commit)
+                    .set_parents(vec![current_commit.id().clone()])
+                    .set_tree(imported_tree)
+                    .set_description(import_description.clone())
+                    .write()
+                    .block_on()
+                    .context("failed to rewrite imported commit")?;
                 session
                     .repo_mut()
-                    .set_local_bookmark_target("current-import".as_ref(), RefTarget::absent());
-                session.mark_dirty();
+                    .rebase_descendants()
+                    .block_on()
+                    .context("failed to rebase descendants after refreshing current-import")?;
+                commit
             }
-            return Ok(ImportOutcome {
-                revision: current,
-                imported,
-                resumed_merge: None,
-            });
-        }
-        ImportPlacement::RefreshUnderMerge(import_commit) => {
-            // Refresh the import's tree in place (keeping its base parent), then
-            // rebase descendants so the merge that sat on top of it follows.
-            // jj re-applies the merge's recorded resolution: an unchanged $HOME
-            // leaves the merge clean, a changed $HOME re-raises the conflict.
-            let refreshed = session
+            ImportPlacement::ReplaceOnDisposableParent => session
                 .repo_mut()
-                .rewrite_commit(&import_commit)
-                .set_tree(imported_tree)
+                .new_commit(current_commit.parent_ids().to_vec(), imported_tree)
                 .set_description(import_description.clone())
                 .write()
                 .block_on()
-                .context("failed to refresh imported commit under the prepared merge")?;
-            session
+                .context("failed to create imported commit on top of disposable `@` parent")?,
+            ImportPlacement::ReplaceOnCurrent => session
                 .repo_mut()
-                .rebase_descendants()
-                .block_on()
-                .context("failed to rebase the prepared merge after refreshing current-import")?;
-            session.repo_mut().set_local_bookmark_target(
-                "current-import".as_ref(),
-                RefTarget::normal(refreshed.id().clone()),
-            );
-            session.mark_dirty();
-            // `rebase_descendants` moved `@` to the rebased merge; reuse it.
-            let resumed_merge = session.current_revision()?;
-            return Ok(ImportOutcome {
-                revision: Revision::new(refreshed.id().clone(), "current-import"),
-                imported,
-                resumed_merge: Some(resumed_merge),
-            });
-        }
-        ImportPlacement::RewriteInPlace(import_commit) => {
-            let commit = session
-                .repo_mut()
-                .rewrite_commit(&import_commit)
-                .set_parents(vec![current_commit.id().clone()])
-                .set_tree(imported_tree)
-                .set_description(import_description.clone())
+                .new_commit(vec![current_commit.id().clone()], imported_tree)
+                .set_description(import_description)
                 .write()
                 .block_on()
-                .context("failed to rewrite imported commit")?;
-            session
-                .repo_mut()
-                .rebase_descendants()
-                .block_on()
-                .context("failed to rebase descendants after refreshing current-import")?;
-            commit
-        }
-        ImportPlacement::ReplaceOnDisposableParent => session
-            .repo_mut()
-            .new_commit(current_commit.parent_ids().to_vec(), imported_tree)
-            .set_description(import_description.clone())
-            .write()
-            .block_on()
-            .context("failed to create imported commit on top of disposable `@` parent")?,
-        ImportPlacement::ReplaceOnCurrent => session
-            .repo_mut()
-            .new_commit(vec![current_commit.id().clone()], imported_tree)
-            .set_description(import_description)
-            .write()
-            .block_on()
-            .context("failed to write imported commit")?,
-    };
+                .context("failed to write imported commit")?,
+        };
     session.repo_mut().set_local_bookmark_target(
         "current-import".as_ref(),
         RefTarget::normal(commit.id().clone()),
@@ -348,8 +342,8 @@ mod tests {
     use jj_lib::backend::CommitId;
     use jj_lib::config::StackedConfig;
     use jj_lib::merged_tree::MergedTree;
-    use jj_lib::repo::Repo;
     use jj_lib::repo::ReadonlyRepo;
+    use jj_lib::repo::Repo;
     use jj_lib::repo_path::RepoPathBuf;
     use jj_lib::settings::UserSettings;
     use jj_lib::simple_backend::SimpleBackend;
@@ -579,7 +573,12 @@ mod tests {
         let merge_tree = tree_with_file(&fixture.repo, fixture.root(), "managed.txt", b"merged")?;
 
         let mut tx = fixture.repo.start_transaction();
-        let import = new_commit(&mut tx, vec![root_id.clone()], import_tree.clone(), "import")?;
+        let import = new_commit(
+            &mut tx,
+            vec![root_id.clone()],
+            import_tree.clone(),
+            "import",
+        )?;
         let target = new_commit(&mut tx, vec![root_id], root_tree(&fixture.repo), "target")?;
         // `@` is a merge whose parents are the import and the target.
         let merge = new_commit(

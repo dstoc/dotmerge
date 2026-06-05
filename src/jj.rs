@@ -1,13 +1,13 @@
 use crate::import;
 use crate::model::{BookmarkSummary, ManagedEntry, ResumeState, Revision};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Local;
 use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
 use jj_lib::config::{ConfigLayer, ConfigSource, StackedConfig};
 use jj_lib::conflicts::{
-    materialize_merge_result_to_bytes, materialize_tree_value, ConflictMarkerStyle,
-    ConflictMaterializeOptions, MaterializedTreeValue,
+    ConflictMarkerStyle, ConflictMaterializeOptions, MaterializedTreeValue,
+    materialize_merge_result_to_bytes, materialize_tree_value,
 };
 use jj_lib::files::FileMergeHunkLevel;
 use jj_lib::fileset::FilesetAliasesMap;
@@ -19,8 +19,8 @@ use jj_lib::op_store::RefTarget;
 use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _, StoreFactories};
 use jj_lib::repo_path::{RepoPath, RepoPathBuf, RepoPathUiConverter};
 use jj_lib::revset::{
-    parse, RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions, RevsetParseContext,
-    RevsetWorkspaceContext, SymbolResolver, UserRevsetExpression,
+    RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions, RevsetParseContext,
+    RevsetWorkspaceContext, SymbolResolver, UserRevsetExpression, parse,
 };
 use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::settings::UserSettings;
@@ -28,7 +28,7 @@ use jj_lib::time_util::DatePatternContext;
 use jj_lib::transaction::Transaction;
 use jj_lib::tree_merge::MergeOptions;
 use jj_lib::working_copy::SnapshotOptions;
-use jj_lib::workspace::{default_working_copy_factories, Workspace};
+use jj_lib::workspace::{Workspace, default_working_copy_factories};
 use pollster::FutureExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -125,7 +125,6 @@ impl JjClient {
             },
         )
     }
-
 }
 
 /// Reflect git-side ref changes into jj's view (`jj git import`).
@@ -349,11 +348,7 @@ impl JjSession {
         }
     }
 
-    pub(crate) fn is_ancestor(
-        &self,
-        ancestor: &Revision,
-        descendant: &Revision,
-    ) -> Result<bool> {
+    pub(crate) fn is_ancestor(&self, ancestor: &Revision, descendant: &Revision) -> Result<bool> {
         let ancestor_commit = self.resolve_revision_to_commit(ancestor)?;
         let descendant_commit = self.resolve_revision_to_commit(descendant)?;
         self.repo()

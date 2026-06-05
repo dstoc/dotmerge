@@ -1,17 +1,19 @@
-use crate::model::{AddSourceKind, FileChangeKind, FileStatusSummary, ManagedEntry, ValidatedAddSource};
-use anyhow::{anyhow, Context, Result};
+use crate::model::{
+    AddSourceKind, FileChangeKind, FileStatusSummary, ManagedEntry, ValidatedAddSource,
+};
+use anyhow::{Context, Result, anyhow};
 use std::ffi::OsString;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::io::Write;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn validate_add_source(input_path: &Path, home: &Path) -> Result<ValidatedAddSource> {
-    let cwd = std::env::current_dir()
-        .context("failed to determine the current working directory")?;
+    let cwd =
+        std::env::current_dir().context("failed to determine the current working directory")?;
     let source_path = resolve_home_path(input_path, home, &cwd)?;
     let metadata = fs::symlink_metadata(&source_path)
         .with_context(|| format!("failed to inspect source path `{}`", source_path.display()))
@@ -536,7 +538,10 @@ mod tests {
         let home = tmp.path();
         // ~/../outside lexically resolves to <home>/../outside which is outside home
         let result = resolve_home_path(Path::new("~/../outside"), home, home);
-        assert!(result.is_err(), "expected rejection for path escaping home via ~/../");
+        assert!(
+            result.is_err(),
+            "expected rejection for path escaping home via ~/../"
+        );
     }
 
     #[test]
@@ -546,7 +551,10 @@ mod tests {
         // Construct an absolute path that goes outside: <home>/../outside
         let outside = home.join("../outside");
         let result = resolve_home_path(&outside, home, home);
-        assert!(result.is_err(), "expected rejection for absolute path outside home");
+        assert!(
+            result.is_err(),
+            "expected rejection for absolute path outside home"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
-use std::path::PathBuf;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Revision {
@@ -192,9 +192,9 @@ pub(crate) struct ImportOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MergeOutcome {
-    NoOp { revision: Revision },        // target already contained the import (right ⊆ left)
+    NoOp { revision: Revision }, // target already contained the import (right ⊆ left)
     FastForward { revision: Revision }, // advanced to target (left ⊆ right)
-    Merged { revision: Revision },      // a real merge commit was created
+    Merged { revision: Revision }, // a real merge commit was created
 }
 
 impl MergeOutcome {

@@ -3,7 +3,7 @@ use crate::config;
 use crate::fs;
 use crate::jj::JjClient;
 use crate::model::ValidatedAddSource;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::collections::HashSet;
 use std::path::PathBuf;
 

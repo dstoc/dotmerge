@@ -7,7 +7,7 @@ use crate::merge;
 use crate::model::{BookmarkSummary, FileStatusSummary, MergeOutcome, ResumeState, Revision};
 use crate::status;
 use crate::util;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 pub fn run(config_flag: Option<&std::path::Path>, args: SyncArgs) -> Result<()> {
     let resolved = config::resolve(
@@ -88,7 +88,14 @@ pub fn run(config_flag: Option<&std::path::Path>, args: SyncArgs) -> Result<()> 
     session.complete_sync(merged.revision())?;
 
     // Build the recap before finish() consumes the session (target_label needs it).
-    let recap = build_recap(&session, &last_sync, &imported.imported, &merged, &exported, &target)?;
+    let recap = build_recap(
+        &session,
+        &last_sync,
+        &imported.imported,
+        &merged,
+        &exported,
+        &target,
+    )?;
     session.finish("dotmerge sync")?;
     print!("{recap}");
     Ok(())
@@ -192,13 +199,7 @@ fn format_file_detail(files: &[FileStatusSummary]) -> String {
     let items: Vec<String> = files
         .iter()
         .take(CAP)
-        .map(|f| {
-            format!(
-                "{} {}",
-                f.path.display(),
-                status::kind_label(&f.kind)
-            )
-        })
+        .map(|f| format!("{} {}", f.path.display(), status::kind_label(&f.kind)))
         .collect();
     let mut result = items.join(", ");
     if files.len() > CAP {
@@ -213,9 +214,7 @@ fn format_merge_outcome(
     target: &Revision,
 ) -> Result<String> {
     Ok(match merged {
-        MergeOutcome::NoOp { .. } => {
-            "none (target already contained the import)".to_string()
-        }
+        MergeOutcome::NoOp { .. } => "none (target already contained the import)".to_string(),
         MergeOutcome::FastForward { .. } => "fast-forward to target".to_string(),
         MergeOutcome::Merged { .. } => {
             let host = util::hostname_label();

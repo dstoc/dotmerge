@@ -311,10 +311,7 @@ fn state_headline(state: &SyncState, summary: &SyncStatusSummary) -> (String, St
                 plural_changes(summary.target_changes.len())
             ),
         ),
-        SyncState::MergePrepared => (
-            "merge prepared".to_string(),
-            "not yet exported".to_string(),
-        ),
+        SyncState::MergePrepared => ("merge prepared".to_string(), "not yet exported".to_string()),
         SyncState::Conflict => (
             "conflict".to_string(),
             "jj conflicts at @ must be resolved before export".to_string(),
@@ -332,18 +329,14 @@ fn state_headline(state: &SyncState, summary: &SyncStatusSummary) -> (String, St
 
 fn sync_will_line(state: &SyncState, resume_state: &ResumeState) -> String {
     match state {
-        SyncState::UpToDate => {
-            "nothing — $HOME, repo, and target already agree".to_string()
-        }
+        SyncState::UpToDate => "nothing — $HOME, repo, and target already agree".to_string(),
         SyncState::LocalChanges => {
             "import the local $HOME changes and advance last-sync".to_string()
         }
         SyncState::Incoming => {
             "merge target into the imported $HOME state, then export".to_string()
         }
-        SyncState::Diverged => {
-            "import the local changes, merge target, then export".to_string()
-        }
+        SyncState::Diverged => "import the local changes, merge target, then export".to_string(),
         SyncState::MergePrepared => {
             "export the prepared merge to $HOME and advance last-sync".to_string()
         }
@@ -359,9 +352,7 @@ fn sync_will_line(state: &SyncState, resume_state: &ResumeState) -> String {
                 "repair `current-import` until it satisfies the resume preconditions, then rerun `dotmerge sync`".to_string()
             }
         }
-        SyncState::RepoDirty => {
-            "clean the repo working copy, then rerun dotmerge sync".to_string()
-        }
+        SyncState::RepoDirty => "clean the repo working copy, then rerun dotmerge sync".to_string(),
     }
 }
 
@@ -383,9 +374,9 @@ pub(crate) fn managed_paths(
 }
 
 pub(crate) fn is_working_copy_clean(source: &impl StatusSource, _repo_path: &Path) -> Result<bool> {
-    source.working_copy_clean_hint()?.ok_or_else(|| {
-        anyhow::anyhow!("StatusSource did not provide a working_copy_clean_hint")
-    })
+    source
+        .working_copy_clean_hint()?
+        .ok_or_else(|| anyhow::anyhow!("StatusSource did not provide a working_copy_clean_hint"))
 }
 
 impl StatusSource for JjSession {
@@ -417,11 +408,7 @@ impl StatusSource for JjSession {
         JjSession::bookmark_summary(self, name)
     }
 
-    fn is_ancestor(
-        &self,
-        ancestor: &Revision,
-        descendant: &Revision,
-    ) -> Result<bool> {
+    fn is_ancestor(&self, ancestor: &Revision, descendant: &Revision) -> Result<bool> {
         JjSession::is_ancestor(self, ancestor, descendant)
     }
 
@@ -438,7 +425,10 @@ impl StatusSource for JjSession {
     }
 }
 
-pub(crate) fn classify_change(base: Option<&ManagedEntry>, other: Option<&ManagedEntry>) -> FileChangeKind {
+pub(crate) fn classify_change(
+    base: Option<&ManagedEntry>,
+    other: Option<&ManagedEntry>,
+) -> FileChangeKind {
     match (base, other) {
         (None, None) => FileChangeKind::Unchanged,
         (Some(_), None) => FileChangeKind::Deleted,

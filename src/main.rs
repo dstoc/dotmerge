@@ -3,11 +3,11 @@
 mod add;
 mod cli;
 mod config;
-mod fs;
 mod export;
+mod fs;
 mod import;
-mod merge;
 mod jj;
+mod merge;
 mod model;
 mod status;
 mod sync;

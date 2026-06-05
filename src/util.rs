@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use std::path::PathBuf;
 
 pub(crate) fn hostname_label() -> String {
