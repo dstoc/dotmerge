@@ -72,6 +72,136 @@ fn add_rejects_cwd_relative_path_resolving_outside_home() {
 }
 
 #[test]
+fn add_rejects_when_at_is_at_or_below_last_sync() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    // A first add + sync establishes last-sync and leaves `@` at the synced
+    // revision.
+    write_file(&sandbox.home().join("a"), "x\n");
+    sandbox
+        .dotmerge()
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("a")
+        .assert()
+        .success();
+    sandbox.run_jj(&["desc", "-m", "have a"]);
+    sandbox
+        .dotmerge()
+        .arg("sync")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("--target")
+        .arg("@")
+        .assert()
+        .success();
+
+    // Now `@` == last-sync; adding here would rewrite synced history.
+    write_file(&sandbox.home().join("b"), "y\n");
+    sandbox
+        .dotmerge()
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("b")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("at or below `last-sync`"));
+
+    // A fresh change clears the way.
+    sandbox.run_jj(&["new"]);
+    sandbox
+        .dotmerge()
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("b")
+        .assert()
+        .success();
+}
+
+#[test]
+fn add_rejects_when_at_is_current_import() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    write_file(&sandbox.repo().join("foo"), "shared\n");
+    sandbox.run_jj(&["desc", "-m", "target foo"]);
+    sandbox.run_jj(&["bookmark", "create", "origin/main"]);
+    sandbox.run_jj(&["new", "root()"]);
+
+    // A first sync (no conflict — identical content) establishes last-sync.
+    write_file(&sandbox.home().join("foo"), "shared\n");
+    sandbox
+        .dotmerge()
+        .arg("sync")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("--target")
+        .arg("origin/main")
+        .assert()
+        .success();
+
+    // Drift $HOME and prepare a merge without exporting so `current-import` is
+    // set and `@` sits on it (the target is already an ancestor, so no conflict).
+    write_file(&sandbox.home().join("foo"), "shared-2\n");
+    sandbox
+        .dotmerge()
+        .arg("sync")
+        .arg("--no-export")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("--target")
+        .arg("origin/main")
+        .assert()
+        .success();
+
+    // Park `@` on `current-import`; adding there would pollute the import.
+    sandbox.run_jj(&["edit", "current-import"]);
+    write_file(&sandbox.home().join("z"), "z\n");
+    sandbox
+        .dotmerge()
+        .arg("add")
+        .arg("--repo")
+        .arg(sandbox.repo())
+        .arg("z")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is `current-import`"));
+}
+
+#[test]
+fn add_rejects_when_at_is_at_or_below_target() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    // Build a target as a descendant of `@`, then move `@` back to its ancestor.
+    sandbox.run_jj(&["new", "-m", "main commit"]);
+    sandbox.run_jj(&["bookmark", "create", "main"]);
+    sandbox.run_jj(&["edit", "@-"]);
+
+    // Configure the target so `add` picks it up as a guard.
+    write_file(
+        &sandbox.default_config_path(),
+        &format!(
+            "repo = \"{}\"\ntarget = \"main\"\n",
+            sandbox.repo().display()
+        ),
+    );
+
+    write_file(&sandbox.home().join("a"), "x\n");
+    sandbox
+        .dotmerge()
+        .arg("add")
+        .arg("a")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("at or below the target"));
+}
+
+#[test]
 fn status_on_initial_repo_reports_missing_last_sync_state() {
     let sandbox = TestSandbox::new();
     sandbox.init_repo();

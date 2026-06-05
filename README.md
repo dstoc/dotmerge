@@ -84,7 +84,7 @@ Each coordinate is resolved independently as `--flag` > config value > fallback:
 | ---------- | ----------------------------------------------------- |
 | `home`     | the real `$HOME`                                      |
 | `repo`     | none — required via flag or config                    |
-| `target`   | none — required for `status`/`sync` (`add` ignores it) |
+| `target`   | none — required for `status`/`sync`; `add` uses it only as a guard |
 
 ## Commands
 
@@ -118,6 +118,12 @@ their corresponding repo-relative paths. This is how a file that exists in
 and symlink identity, and does not require a clean working copy. Paths may be
 absolute, `~/`-prefixed, or relative to the current directory; either way the
 resolved location must be inside `$HOME`.
+
+Because `add` writes into the `@` working copy, it refuses to run when `@` is a
+sync-critical revision — at or below `last-sync`, at or below the configured
+target, or exactly `current-import` — since that would rewrite synced/target
+history or pollute an in-progress import. Start a fresh change with `jj new`
+first.
 
 ## Workflow
 `dotmerge` output and recommended `jj` workflows are still being refined. Here are some recipes:

@@ -106,7 +106,9 @@ pub(crate) fn expand_path(raw: &str) -> Result<PathBuf> {
 pub(crate) struct ResolvedConfig {
     pub(crate) home: PathBuf,
     pub(crate) repo: PathBuf,
-    /// `None` only when `need_target` was `false` (i.e. the `add` subcommand).
+    /// The sync target, from the flag or config. `None` only when no target was
+    /// supplied and the command did not require one (`add`, which still uses a
+    /// configured target — when present — as a safety guard).
     pub(crate) target: Option<String>,
 }
 
@@ -121,7 +123,8 @@ pub(crate) struct ResolvedConfig {
 /// * `repo` fallback: none — errors with `--repo is required (no repo in config)`.
 /// * `target` fallback: none when `need_target` is `true` — errors with
 ///   `--target is required (no target in config)`.  When `need_target` is
-///   `false` (the `add` subcommand), `target` is always `None`.
+///   `false` (the `add` subcommand), a missing target is not an error, but a
+///   flag/config target is still returned (used only as a safety guard).
 pub(crate) fn resolve(
     config_flag: Option<&Path>,
     home_flag: Option<&Path>,
@@ -156,16 +159,17 @@ pub(crate) fn resolve(
     };
 
     // --- target ---
-    // When need_target is false (i.e. `add`), target is always None; the
-    // subcommand does not use it and we never consult the config for it.
-    let target = if !need_target {
-        None
-    } else if let Some(flag) = target_flag {
+    // Populated from the flag or config when available. `need_target` only
+    // controls whether a *missing* target is an error: `status`/`sync` require
+    // one, while `add` uses a configured target (if any) only as a safety guard.
+    let target = if let Some(flag) = target_flag {
         Some(flag.to_string())
     } else if let Some(val) = file.target {
         Some(val)
-    } else {
+    } else if need_target {
         return Err(anyhow!("--target is required (no target in config)"));
+    } else {
+        None
     };
 
     Ok(ResolvedConfig { home, repo, target })
@@ -477,9 +481,10 @@ target = "origin/main"
         );
     }
 
-    /// need_target=false yields target=None even when config has one.
+    /// need_target=false still returns a configured target (used as a guard by
+    /// `add`); only a *missing* target is tolerated.
     #[test]
-    fn resolve_need_target_false_yields_none() {
+    fn resolve_need_target_false_reads_config_target() {
         let _guard = ENV_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg_path = tmp.path().join("config.toml");
@@ -494,7 +499,12 @@ target = "origin/main"
         )
         .unwrap();
 
-        // No target_flag, need_target=false → target should be None.
+        // No target_flag, need_target=false → config target is still returned.
+        let resolved = resolve(Some(&cfg_path), None, None, None, false).unwrap();
+        assert_eq!(resolved.target.as_deref(), Some("origin/main"));
+
+        // ...but a missing target is tolerated (no error) for need_target=false.
+        std::fs::write(&cfg_path, format!("repo = \"{}\"\n", repo_dir.display())).unwrap();
         let resolved = resolve(Some(&cfg_path), None, None, None, false).unwrap();
         assert!(resolved.target.is_none());
     }

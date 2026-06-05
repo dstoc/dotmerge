@@ -488,11 +488,18 @@ Conceptually, it is just a helper for copying one or more home files into the co
 
 Suggested behavior:
 
-1. Verify that each `PATH` is inside `$HOME`.
-2. Verify that each `PATH` is a file and currently exists in `$HOME`.
-3. Verify that each corresponding repo-relative path does not already exist in the repo.
-4. Copy or stage each file into the repo working copy selected by `--repo` at the corresponding repo-relative path.
-5. Make those files visible to the next import/merge/export cycle.
+1. Verify that `@` is a fresh change, not a sync-critical revision. `add` writes
+   into the `@` working copy, so it must refuse when `@` is at or below
+   `last-sync`, at or below the configured target, or exactly `current-import` —
+   otherwise the copy would rewrite synced/target history or pollute the
+   in-progress import. The fix is to start a fresh change (`jj new`) first. A
+   target that is not configured, or that does not resolve yet (e.g. during
+   bootstrap), is simply not checked.
+2. Verify that each `PATH` is inside `$HOME`.
+3. Verify that each `PATH` is a file and currently exists in `$HOME`.
+4. Verify that each corresponding repo-relative path does not already exist in the repo.
+5. Copy or stage each file into the repo working copy selected by `--repo` at the corresponding repo-relative path.
+6. Make those files visible to the next import/merge/export cycle.
 
 When copying into the repo, `dotmerge add` should preserve executable bits and symlink identity. A managed symlink may point outside `$HOME`: `add` only requires the symlink's own location to be inside `$HOME`, and records the link verbatim rather than copying whatever it points to.
 
@@ -547,7 +554,8 @@ Each of `home`, `repo`, `target` is resolved independently:
 - `home` falls back to the real `$HOME`.
 - `repo` has no fallback: missing everywhere is an error.
 - `target` has no fallback for `status`/`sync`: missing everywhere is an error.
-  `add` does not use `target`.
+  `add` does not require `target`, but uses a configured target (when present)
+  as a safety guard — it refuses to add onto the target or its ancestors.
 
 ### Locating the config file
 

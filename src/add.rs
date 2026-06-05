@@ -23,6 +23,8 @@ pub fn run(config_flag: Option<&std::path::Path>, args: AddArgs) -> Result<()> {
     let home = resolved.home;
     let client = JjClient::open(&resolved.repo)?;
 
+    ensure_addable_working_copy(&client, resolved.target.as_deref())?;
+
     let mut seen_repo_paths = HashSet::new();
     let mut planned = Vec::with_capacity(args.paths.len());
 
@@ -51,6 +53,48 @@ pub fn run(config_flag: Option<&std::path::Path>, args: AddArgs) -> Result<()> {
 
     for entry in &planned {
         fs::copy_add_source(&entry.source, &entry.destination_path)?;
+    }
+
+    Ok(())
+}
+
+/// Refuse to add when `@` coincides with a sync-critical revision.
+///
+/// `add` writes directly into the `@` working copy, so it must sit on a fresh
+/// change — not on `last-sync` (or an ancestor of it), the configured target
+/// (or an ancestor of it), or `current-import`. Adding onto any of those would
+/// rewrite synced/target history or pollute the in-progress import. The fix is
+/// always to start a fresh change with `jj new` first.
+fn ensure_addable_working_copy(client: &JjClient, target: Option<&str>) -> Result<()> {
+    let session = client.begin()?;
+    let current = session.current_revision()?;
+
+    if let Some(last_sync) = session.bookmark_summary("last-sync")?.revision {
+        if session.is_ancestor(&current, &last_sync)? {
+            return Err(anyhow!(
+                "`@` is at or below `last-sync`, so `dotmerge add` would rewrite already-synced history.\n\nstart a fresh change first (`jj new`), then rerun `dotmerge add`."
+            ));
+        }
+    }
+
+    if let Some(current_import) = session.bookmark_summary("current-import")?.revision {
+        if current.same(&current_import) {
+            return Err(anyhow!(
+                "`@` is `current-import`, so `dotmerge add` would pollute the in-progress import.\n\nstart a fresh change first (`jj new`), then rerun `dotmerge add`."
+            ));
+        }
+    }
+
+    if let Some(target) = target {
+        // The configured target may not resolve yet (e.g. during bootstrap
+        // before it exists); a target we can't resolve simply isn't checked.
+        if let Ok(target_rev) = session.resolve_rev(target) {
+            if session.is_ancestor(&current, &target_rev)? {
+                return Err(anyhow!(
+                    "`@` is at or below the target `{target}`, so `dotmerge add` would rewrite target history.\n\nstart a fresh change first (`jj new`), then rerun `dotmerge add`."
+                ));
+            }
+        }
     }
 
     Ok(())
