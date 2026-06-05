@@ -48,6 +48,14 @@ pub fn run(config_flag: Option<&std::path::Path>, args: SyncArgs) -> Result<()> 
     }
 
     if session.has_conflicts(merged.revision())? {
+        // Persist the conflicted merge and `current-import` so the user can
+        // resolve the conflicts in the repo and rerun. Without finishing the
+        // transaction, the import commit, merge commit, `@` checkout, and
+        // `current-import` bookmark would all be discarded — leaving nothing to
+        // resolve despite the message saying otherwise. We deliberately do not
+        // move `last-sync` (no `complete_sync`); it only advances after a clean
+        // export.
+        session.finish("dotmerge sync")?;
         return Err(anyhow!(
             "merge produced jj conflicts at `@`; resolve them in the repo, then rerun `dotmerge sync`"
         ));

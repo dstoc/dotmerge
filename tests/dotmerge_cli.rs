@@ -334,6 +334,57 @@ fn sync_exports_moved_bookmarks_to_colocated_git_refs() {
 }
 
 #[test]
+fn sync_conflict_persists_current_import_and_conflicted_merge() {
+    let sandbox = TestSandbox::new();
+    sandbox.init_repo();
+
+    // Target adds `foo` with one content; $HOME has `foo` with conflicting
+    // content. With no last-sync, base is the empty tree, so both sides add
+    // `foo` differently and the merge conflicts.
+    write_file(&sandbox.repo().join("foo"), "from-target\n");
+    sandbox.run_jj(&["desc", "-m", "target foo"]);
+    sandbox.run_jj(&["bookmark", "create", "origin/main"]);
+    sandbox.run_jj(&["new", "root()"]);
+
+    write_file(&sandbox.home().join("foo"), "from-home\n");
+
+    let mut cmd = sandbox.dotmerge();
+    cmd.arg("sync")
+        .arg("--target")
+        .arg("origin/main")
+        .arg("--repo")
+        .arg(sandbox.repo());
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "merge produced jj conflicts at `@`",
+        ));
+
+    // The conflicted state must be persisted for the user to resolve and rerun,
+    // not discarded with the transaction.
+    assert_bookmark_present(sandbox.home(), sandbox.repo(), "current-import");
+    let at_is_conflict = sandbox
+        .jj_stdout(&[
+            "log",
+            "-r",
+            "@",
+            "--no-graph",
+            "-T",
+            "if(conflict, \"yes\", \"no\")",
+        ])
+        .trim()
+        .to_string();
+    assert_eq!(
+        at_is_conflict, "yes",
+        "expected `@` to be left at the conflicted merge"
+    );
+
+    // last-sync must not move: it only advances after a clean export.
+    assert_bookmark_absent(sandbox.home(), sandbox.repo(), "last-sync");
+}
+
+#[test]
 fn sync_commits_one_dotmerge_operation_in_op_log() {
     let sandbox = TestSandbox::new();
     sandbox.init_repo();
